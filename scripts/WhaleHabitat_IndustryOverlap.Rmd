@@ -1,0 +1,132 @@
+---
+title: "Overlap between suitable blue whale habitat and industry"
+author: "Dawn Barlow"
+date: "6/11/2021"
+output: html_document
+---
+```{r}
+library(dplyr)
+library(raster)
+library(ggplot2)
+library(gridExtra)
+library(maps)
+library(sf)
+library(rgdal)
+library(rgeos)
+library(dismo)
+library(gbm)
+library(ggBRT)
+library(zoo)
+library(viridis)
+library(purrr)
+library(magick)
+library(ROCR)
+library(PNWColors)
+
+
+predlayers.list <- readRDS("predlayers.list.rds")
+
+NZ <- map_data("nz") # get outline of New Zealand from maps package (useful for quick plotting, use hi-res map from shapefile for figure)
+NZcoastlines <- readOGR("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/nz-coastlines-and-islands-polygons-topo-150k.shp")
+NZcoastlines <- spTransform(NZcoastlines, CRS('+proj=longlat +datum=WGS84'))
+NZcoastlines.sf <- st_as_sf(NZcoastlines)
+
+rigs <- read.csv("oil_rig_locations.csv")
+ports <- read.csv("port locations.csv")
+
+PetroleumWells <- readOGR("./petroleum permit areas shapefiles/Petroleum_Wells.shp")
+PetroleumActivePermits <- readOGR("./petroleum permit areas shapefiles/Petroleum_Active_Permits.shp")
+MineralActivePermits <- readOGR("./mineral permit areas shapefiles/Mineral_Active_Permits.shp")
+
+PetroleumWells <- spTransform(PetroleumWells, CRS('+proj=longlat +datum=WGS84'))
+PetroleumActivePermits <- spTransform(PetroleumActivePermits, CRS('+proj=longlat +datum=WGS84'))
+MineralActivePermits <- spTransform(MineralActivePermits, CRS('+proj=longlat +datum=WGS84'))
+
+PetroleumWells.sf <- st_as_sf(PetroleumWells)
+PetroleumActivePermits.sf <- st_as_sf(PetroleumActivePermits)
+MineralActivePermits.sf <- st_as_sf(MineralActivePermits)
+
+# remove areas on land
+PetroleumWells.noland <- st_difference(PetroleumWells.sf, st_union(NZcoastlines.sf))
+PetroleumActivePermits.noland <- st_difference(PetroleumActivePermits.sf, st_union(NZcoastlines.sf))
+MineralActivePermits.noland <- st_difference(MineralActivePermits.sf, st_union(NZcoastlines.sf))
+
+unique(PetroleumActivePermits.noland$PERMIT_TYP)
+PetroleumActivePermits.noland$permit_type <- NA
+PetroleumActivePermits.noland$permit_type[PetroleumActivePermits.noland$PERMIT_TYP=="Mining Permit"] <- "Petroleum mining permit"
+PetroleumActivePermits.noland$permit_type[PetroleumActivePermits.noland$PERMIT_TYP=="Mining Licence"] <- "Petroleum mining license"
+PetroleumActivePermits.noland$permit_type[PetroleumActivePermits.noland$PERMIT_TYP=="Exploration Permit"] <- "Petroleum exploration permit"
+
+unique(MineralActivePermits.noland$PERMIT_TYP)
+MineralActivePermits.noland$permit_type <- NA
+MineralActivePermits.noland$permit_type[MineralActivePermits.noland$PERMIT_TYP=="Mining Permit"] <- "Mineral mining permit"
+MineralActivePermits.noland$permit_type[MineralActivePermits.noland$PERMIT_TYP=="Exploration Permit"] <- "Mineral exploration permit"
+
+```
+
+```{r}
+
+ggplot() +
+  geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+  geom_sf(data=PetroleumActivePermits.noland, aes(color=permit_type, fill=permit_type), alpha=0.3) +
+  geom_sf(data=MineralActivePermits.noland, aes(color=permit_type, fill=permit_type), alpha=0.3) +
+  scale_color_manual(values = pnw_palette("Sailboat", n=5, type="discrete")) +
+  scale_fill_manual(values = pnw_palette("Sailboat", n=5, type="discrete")) +
+  geom_sf(data=PetroleumWells.noland[PetroleumWells.noland$WELLBORE_S=="producing",],shape=24, fill="red") +
+  geom_point(data = ports, aes(x=Lon, y=Lat), shape=22, fill="blue", size=2) +
+  coord_sf(xlim=c(170.4, 175.2), ylim=c(-42.05, -39)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  xlab("") + ylab("") +  
+  theme_bw()
+
+# combine permit area polygons:
+PetMinAreas.sf <- st_union(PetroleumActivePermits.noland, MineralActivePermits.noland)
+
+ggplot() +
+  geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+  geom_sf(data=PetMinAreas.sf) +
+  geom_sf(data=PetroleumWells.noland[PetroleumWells.noland$WELLBORE_S=="producing",],shape=24, fill="red") +
+  geom_point(data = ports, aes(x=Lon, y=Lat), shape=22, fill="blue", size=2) +
+  coord_sf(xlim=c(170.4, 175.2), ylim=c(-42.05, -39)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  xlab("") + ylab("") +  
+  theme_bw()
+
+```
+
+# Calculate overlap
+```{r}
+
+# Mask out areas of pred layers not within petroleum and mineral areas:
+predlayers.stack <- stack(predlayers.list)
+predlayers_PetMinAreas.stack <- mask(predlayers.stack, PetMinAreas.sf)
+
+
+# make it a loop
+PropOverThresh <- c()
+
+for (i in 1:length(predlayers_PetMinAreas.stack)) {
+
+  print(i)
+  
+  predmatrix_i <- as.matrix(predlayers_PetMinAreas.stack[[i]])
+  
+  ratio_i <- length(which(predmatrix_i>0.4))/length(which(predmatrix_i>-1))
+  
+  PropOverThresh[i] <- ratio_i
+  
+}
+
+#PropOverThresh
+
+mean(PropOverThresh)
+sd(PropOverThresh)
+range(PropOverThresh)
+
+
+length(PropOverThresh[PropOverThresh>0.5])/length(PropOverThresh)
+
+```
+
+
+

@@ -1,0 +1,224 @@
+---
+title: "Whale forecast models - all sightings, with bootstrapping"
+author: "Dawn Barlow"
+date: "6/11/2021"
+output: html_document
+---
+
+```{r}
+
+library(dplyr)
+library(raster)
+library(ggplot2)
+library(gridExtra)
+library(maps)
+library(sf)
+library(rgdal)
+library(rgeos)
+library(dismo)
+library(gbm)
+library(ggBRT)
+library(zoo)
+library(viridis)
+library(purrr)
+library(magick)
+library(ROCR)
+
+# PA data data (all sightings and background points)
+PA_AllSightings.df <- read.csv("SightingsBackgroundPoints.RSdata.forecast_Jan2021.csv")
+PA_AllSightings.df$X <- NULL
+
+SightingsDates <- as.Date(unique(PA_AllSightings.df$Date))
+length(SightingsDates)
+
+PA_AllSightings.df$Date <- as.Date(PA_AllSightings.df$Date)
+
+```
+
+
+
+```{r}
+
+# make study area polygon using sf
+Lon <- c(171.5,170.55,171.85,174.7, 175.5, 174.7,174.3,172.77,171.5) # need to "close" the polygon
+Lat <- c(-42.05,-42.05,-38.6,-38.6, -40.5 ,-41.2,-41.2,-40.55,-42.05)
+
+StudyArea <- as.data.frame(cbind(Lon,Lat)) 
+
+StudyArea.polygon_wgs <- StudyArea %>%
+  st_as_sf(coords = c("Lon", "Lat"),crs = "+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs") %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  st_cast("POLYGON")
+
+#plot(StudyArea.polygon_wgs, axes=TRUE)
+
+# plot sightings by year
+NZ <- map_data("nz") 
+ggplot() +
+  geom_point(data = PA_AllSightings.df[PA_AllSightings.df$presence==1,], aes(x=Longitude, y=Latitude), shape=24, fill="royal blue") +
+  geom_sf(data = StudyArea.polygon_wgs, fill = "transparent") +
+  geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="dark gray") +
+  coord_sf(xlim=c(170,175.2), ylim=c(-42.05,-38.5)) +
+  facet_wrap(~SummerYear, nrow=2)
+
+```
+
+# prep data for spatial predictions
+```{r}
+
+# Read in raster layers
+bathy_STB.r <- raster("STBbathy_1km.tif")
+
+SSTforecast.list <- list.files(path = "./Spatial prediction maps/All Sightings Dates/SST rasters/forecasted", pattern =".tif", full.names=TRUE)
+SSTforecast.stack <- stack(SSTforecast.list)
+
+logNPPforecast.list <- list.files(path = "./Spatial prediction maps/All Sightings Dates/NPP rasters/forecasted", pattern =".tif", full.names=TRUE)
+logNPPforecast.stack <- stack(logNPPforecast.list)
+
+# Set extent, resolution so that all are same
+e.STB <- extent(170, 175.2, -42.05, -39.3)
+extent(bathy_STB.r) <- e.STB
+
+SSTforecast.testday <- raster(SSTforecast.stack[[1]])
+
+bathy_STB.r <- resample(bathy_STB.r, SSTforecast.testday, method='ngb')
+
+# Make spatial polygon of study area to crop to for pred maps
+StudyArea.coords <- cbind(Lon,Lat)
+
+p <- Polygon(StudyArea.coords)
+ps <- Polygons(list(p),1)
+StudyArea.polygon <- SpatialPolygons(list(ps))
+#plot(StudyArea.polygon)
+
+```
+
+# MODELS
+############################ BOOTSTRAPPING #########################################
+one loop ~20 min
+```{r}
+
+# SET UP LISTS TO STORE ANY VALUES WANTED
+cvAUC.list <- list()
+cvDevExp.list <- list()
+predAUC.list <- list()
+ntrees.list <- list()
+
+predlayers.list <- list()
+predvalues.sightings.list <- list()
+predvalues.background.list <- list()
+
+# START BOOTSTRAPPING LOOP HERE:
+for (i in seq(1:100)) {
+  
+  p <- i # use this to track progress
+  print(p)
+
+  # partition training and test datasets
+  Dates.test.i <- sample(SightingsDates, size=26, replace=F) # sample 20% of dates for test dataset (0.2*length(SightingsDates)), 26 dates
+  Dates.training.i <- SightingsDates[! SightingsDates %in% Dates.test.i]
+  
+  training.df <- filter(PA_AllSightings.df, Date %in% Dates.training.i)
+  test.df <- filter(PA_AllSightings.df, Date %in% Dates.test.i)
+  
+  # re-calculate weights for each dataset
+  training.df$weights <- training.df$Group.Size
+  training.df$weights[training.df$presence==0] <- sum(training.df$Group.Size) / length(which(training.df$presence==0))
+  
+  test.df$weights <- test.df$Group.Size
+  test.df$weights[test.df$presence==0] <- sum(test.df$Group.Size) / length(which(test.df$presence==0))
+  
+  # MODEL: 
+  BRT.i <- gbm.step(training.df,
+                    gbm.x = c(12,14,17,18,22,23), 
+                    gbm.y = 11, 
+                    family = "bernoulli",
+                    site.weights = training.df$weights,
+                    bag.fraction = 0.75,
+                    learning.rate = 0.0125,
+                    tree.complexity = 3, 
+                    plot.main = FALSE) 
+  
+  # Model eval metrics
+  BRTperf <- ggPerformance(BRT.i)
+  cvAUC.list[[i]] <- BRTperf[8,1]
+  cvDevExp.list[[i]] <- BRTperf[9,1]
+  
+  ntrees.list[[i]] <- BRT.i$gbm.call$best.trees
+  
+  # PREDICT
+  # predict to withheld data
+  BRT.i_pred <- predict.gbm(BRT.i, test.df, n.trees = BRT.i$gbm.call$best.trees, type="response")
+  
+  # AUC for predicting to withheld data (from 'ROCR' package)
+  pred.auc <- performance(prediction(BRT.i_pred, test.df$presence), "auc") 
+  predAUC.list[[i]] <- pred.auc@y.values
+
+  # predict spatially to withheld dates, sample predicted values at PA locations
+  DateIDs.test.i <- unique(test.df$DateID)
+  Dates.test.i <- Dates.test.i[order(Dates.test.i)]
+  
+  for(i in 1:length(DateIDs.test.i)) {
+   
+     j <- DateIDs.test.i[[i]]
+     
+     # create relative SST and NPP layers
+     SSTrelative.i <- SSTforecast.stack[[i]]/maxValue(SSTforecast.stack[[i]])
+     logNPPrelative.i <- logNPPforecast.stack[[i]]/maxValue(logNPPforecast.stack[[i]])
+
+     # resample NPP to correct resolution   
+     logNPPforecast.resamp.i <- resample(logNPPforecast.stack[[j]], SSTforecast.testday, method='ngb')
+     logNPPrelative.resamp.i <- resample(logNPPrelative.i, SSTforecast.testday, method='ngb')
+     
+     # create DayofSeason layer to predict over
+     DayofSeason.i <- raster()
+     extent(DayofSeason.i) <- e.STB
+     values(DayofSeason.i) <- mean(test.df$DayofSeason[test.df$DateID==j])
+     DayofSeason.resamp.i <- resample(DayofSeason.i, SSTforecast.testday, method='ngb')
+    
+     # Make daily raster stacks, where i is date (corresponds with DateID in sightings df) 
+     envstack <- stack(SSTforecast.stack[[j]], logNPPforecast.resamp.i, bathy_STB.r, DayofSeason.resamp.i, SSTrelative.i, logNPPrelative.resamp.i)
+     names(envstack) <- c("SST.observed","logNPP.observed","Depth", "DayofSeason", "Relative.SST", "Relative.logNPP") 
+     
+     # Use BRT model to predict over daily raster stack
+     preds <- predict(envstack,BRT.i, n.trees = BRT.i$gbm.call$best.trees, type = "response")
+     preds <- mask(preds, StudyArea.polygon) # mask out areas outside of study area
+     predlayers.list[[length(predlayers.list)+1]] <- preds
+     names(predlayers.list)[[length(predlayers.list)]] <- as.character(Dates.test.i[i])
+     
+     # extract habitat suitability values at sighting and background locations 
+     sightings.i <- subset(test.df, Date==Dates.test.i[i]) # sightings for the date of interest
+     sightings.i_rep <- sightings.i[rep(rownames(sightings.i), sightings.i$Group.Size), ] # repeat rows by group size (sneaky way of weighting mean)
+     coordinates(sightings.i_rep) = ~Longitude+Latitude
+     predvalues.sightings.i <- extract(preds,sightings.i_rep) # extract predicted probability of presence at BW locations
+     
+     background.i <- subset(test.df[test.df$presence==0,], Date==Dates.test.i[i]) # background points for the date of interest
+     coordinates(background.i) = ~Longitude+Latitude
+     predvalues.background.i <- extract(preds,background.i) # extract predicted probability of presence at background locations
+   
+     # store extracted values at sighting/background locations
+     predvalues.sightings.list[[length(predvalues.sightings.list)+1]] <- predvalues.sightings.i # store predicted values at sighting locations 
+     predvalues.background.list[[length(predvalues.background.list)+1]] <- predvalues.background.i # store predicted values at sighting locations 
+
+     
+  }
+  
+}
+
+
+```
+
+
+```{r}
+
+saveRDS(cvAUC.list, file = "cvAUC.list.rds")
+saveRDS(cvDevExp.list, file = "cvDevExp.list.rds")
+saveRDS(predAUC.list, file = "predAUC.list.rds")
+saveRDS(ntrees.list, file = "ntrees.list.rds")
+saveRDS(predlayers.list, file = "predlayers.list.rds")
+saveRDS(predvalues.sightings.list, file = "predvalues.sightings.list.rds")
+saveRDS(predvalues.background.list, file = "predvalues.background.list.rds")
+
+
+```
+

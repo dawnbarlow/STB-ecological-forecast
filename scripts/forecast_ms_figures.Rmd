@@ -1,0 +1,1275 @@
+---
+title: "Forecast ms figures"
+author: "Dawn Barlow"
+date: "6/11/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(raster)
+library(ggplot2)
+library(gridExtra)
+library(maps)
+library(sf)
+library(rgdal)
+library(rgeos)
+library(dismo)
+library(gbm)
+library(ggBRT)
+library(zoo)
+library(viridis)
+library(cowplot)
+library(RColorBrewer)
+library(pdp)
+library(ggpubr)
+
+```
+
+# Fig. 1
+Map of the STB with regions, grid points for forecast models, wind station, upwelling index calculation areas 
+```{r}
+
+# grid point locations for forecast model data
+gridSTB.df <- read.csv("gridSTB.pointlocations.df.csv")
+
+# upwelling index calculation areas
+# Chiswell offshore
+xcoord_Chiswell.off <- c(171.6, 172.5, 172.5, 171.6, 171.6)
+ycoord_Chiswell.off <- c(-39.25, -39.25, -40.25, -40.25, -39.25)
+Upwelling_off.df <- as.data.frame(cbind(xcoord_Chiswell.off,ycoord_Chiswell.off)) 
+Upwelling_off.polygon <- Upwelling_off.df %>%
+  st_as_sf(coords = c("xcoord_Chiswell.off", "ycoord_Chiswell.off"),crs = "+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs") %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  st_cast("POLYGON")
+
+# Chiswell onshore 
+xcoord_Chiswell.on <- c(172.1, 172.6, 172.6, 172.1, 172.1)
+ycoord_Chiswell.on <- c(-40.55, -40.55, -40.8, -40.8, -40.55)
+Upwelling_on.df <- as.data.frame(cbind(xcoord_Chiswell.on,ycoord_Chiswell.on)) 
+Upwelling_on.polygon <- Upwelling_on.df %>%
+  st_as_sf(coords = c("xcoord_Chiswell.on", "ycoord_Chiswell.on"),crs = "+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs") %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  st_cast("POLYGON")
+
+NZ <- map_data("nz") # get outline of New Zealand from maps package (useful for quick plotting, use hi-res map from shapefile for figure)
+NZcoastlines <- readOGR("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/nz-coastlines-and-islands-polygons-topo-150k.shp")
+
+NZcoastlines.sf <- st_as_sf(NZcoastlines)
+
+
+# Get bathymetry data
+bathy <- raster("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/NIWA_depth_rast_.5x.5.tif")
+bathy
+#resample at 1 km resolution
+bathy <- aggregate(bathy,fact = 2)
+
+bathy <- projectRaster(bathy, crs = ('+proj=longlat +datum=WGS84'))
+bathy_STB <- crop(bathy, extent(170, 177, -43, -38.5))
+
+bathy_STB.df <- as.data.frame(bathy_STB, xy=TRUE)
+bathy_STB.df$Depth <- (bathy_STB.df$layer)* -1
+bathy_STB.df$Depth[bathy_STB.df$Depth>0] <- 0
+bathy_STB.df$Depth[bathy_STB.df$Depth<(-350)] <- -350
+
+# Wind station locations
+WindStationlocs <- read.csv("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/RS models and lag/Station_Locations.csv")
+
+# Region boundaries
+e.west <- extent(171.02, 172.8, -42, -39.3)
+e.west <- as(e.west, "SpatialPolygons")
+
+e.central <- extent(172.6, 174.3, -41.25, -39.3)
+e.central <- as(e.central, "SpatialPolygons")
+
+e.east <- extent(174.1, 175.2, -41.2, -39.3)
+e.east <- as(e.east, "SpatialPolygons")
+
+
+
+# MAP
+StudyArea.map1 <- ggplot() +
+  geom_tile(data = bathy_STB.df, aes(x=x, y=y, fill=Depth)) +
+  geom_point(data = gridSTB.df, aes(x=Lon, y=Lat), shape=3, color="white", size=0.75) +
+  geom_sf(data = Upwelling_off.polygon, color="dark gray", fill = "light gray", alpha=0.4) +
+  geom_sf(data = Upwelling_on.polygon, color="dark gray", fill = "light gray", alpha=0.4) +
+  #geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="black") +
+  geom_sf(data = NZcoastlines.sf, color="black", fill="black") +
+  coord_sf(xlim=c(171,176), ylim=c(-42,-39.2)) +
+  
+  geom_polygon(data = e.west, aes(x=long, y=lat), color="green", fill="transparent") +
+  geom_polygon(data = e.central, aes(x=long, y=lat), color="yellow", fill="transparent") +
+  geom_polygon(data = e.east, aes(x=long, y=lat), color="orange", fill="transparent") +
+
+  annotate(geom = "text", y=-39.18, x=171.91, label = "WEST", color = "green", size = 3.15) +
+  annotate(geom = "text", y=-39.18, x=173.45, label = "CENTRAL", color = "yellow", size = 3.15) +
+  annotate(geom = "text", y=-39.18, x=174.65, label = "EAST", color = "orange", size = 3.15) +
+  
+  geom_point(data = WindStationlocs[WindStationlocs$Station=="Farewell Spit",], aes(x=Lon, y=Lat), shape=24, fill="purple", size=2.6)+
+
+  theme(legend.background = element_blank(), legend.text = element_text(color = "white"), legend.title = element_text(color = "white")) +
+  ylab("Latitude") + xlab("Longitude") +
+  theme(legend.justification=c(1,0), legend.position=c(.96,.25))
+  
+  
+StudyArea.map1
+
+STB_inset <- data.frame(long = c(171, 171, 176, 176, 171), 
+                        lat = c(-39.3, -42, -42, -39.3, -39.3))
+
+NZ_inset.map <- ggplotGrob(
+  ggplot() +
+    geom_polygon(data = NZcoastlines, aes(x=long, y=lat, group=group), color="gray", fill="gray") + 
+    geom_path(data = STB_inset, aes(x = long, y = lat), size = 0.8, color="white") + 
+    coord_quickmap(xlim=c(165,179), ylim=c(-48.2,-34.5))+ # Set display extent 
+    theme(axis.title = element_blank(), axis.text.x = element_text(angle = 45, hjust = 1), 
+          rect = element_rect(fill = "transparent"), panel.background = element_blank(),
+          axis.ticks = element_line(color = "white"), panel.grid = element_blank(),
+          axis.text = element_text(color="white"), panel.border = element_rect(color = "white"),
+          plot.background = element_rect(color = "transparent")) 
+    
+)
+
+StudyArea.map2 <- StudyArea.map1 +
+  annotation_custom(grob = NZ_inset.map, xmin = 175.2, xmax = 176.25,
+                        ymin = -40.6, ymax = -38.9)
+
+StudyArea.map2
+
+#ggsave(StudyArea.map2, filename="./forecast models manuscript/plots/StudyAreaMap.png", device = "png", height=140, width=180, units="mm")
+
+
+
+```
+
+# Fig. 2
+Example forecast layers, satellite image comparison
+```{r}
+## SST plots
+SST.forecasted_20140125.r <- raster("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/Spatial prediction maps/SST rasters/forecasted/SST.forecasted_2014-01-25.tif")
+SST.observed_20140125.r <- raster("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/Spatial prediction maps/SST rasters/observed/SST.observed_2014-01-25.tif")
+
+# Convert predicted raster to df, so it can be brought in to ggplot more easily
+SST.forecasted_20140125.df <- as.data.frame(as(SST.forecasted_20140125.r, "SpatialPixelsDataFrame"))
+SST.observed_20140125.df <- as.data.frame(as(SST.observed_20140125.r, "SpatialPixelsDataFrame"))
+
+# mask out cook strait region
+SST.forecasted_20140125.df[SST.forecasted_20140125.df$x > 173 & SST.forecasted_20140125.df$y < -41.2,] <- NA # remove Cook Strait points
+SST.observed_20140125.df[SST.observed_20140125.df$x > 173 & SST.observed_20140125.df$y < -41.2,] <- NA # remove Cook Strait points
+
+colnames(SST.observed_20140125.df)[1] <- "SST"
+colnames(SST.forecasted_20140125.df)[1] <- "SST"
+
+
+p1 <- ggplot() +
+  geom_tile(data = SST.observed_20140125.df, aes(x=x, y=y, fill=SST)) + 
+  scale_fill_distiller(palette="Spectral", limits = c(14.35,22.45))+ 
+  #geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="black") +
+  #coord_quickmap(xlim=c(170, 175.2), ylim=c(-42.05, -39.3))+ 
+  geom_sf(data = NZcoastlines.sf, color="black", fill="black") +
+  coord_sf(xlim=c(170, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  labs(fill = "SST") + ggtitle("2014-01-25\nobserved") +
+  theme(plot.title = element_text(size=10),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5), 
+        axis.text = element_text(size = 6)) 
+
+p2 <- ggplot() +
+  geom_tile(data = SST.forecasted_20140125.df, aes(x=x, y=y, fill=SST)) +   
+  scale_fill_distiller(palette="Spectral", limits = c(14.35,22.45))+ 
+  geom_sf(data = NZcoastlines.sf, color="black", fill="black") +
+  coord_sf(xlim=c(170, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  labs(fill = "SST") + ggtitle("2014-01-25\nforecast") +
+  theme(plot.title = element_text(size=10),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5), 
+        axis.text = element_text(size = 6)) 
+
+
+SST.forecasted_20160202.r <- raster("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/Spatial prediction maps/SST rasters/forecasted/SST.forecasted_2016-02-02.tif")
+SST.observed_20160202.r <- raster("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/Spatial prediction maps/SST rasters/observed/SST.observed_2016-02-02.tif")
+
+# Convert predicted raster to df, so it can be brought in to ggplot more easily
+SST.forecasted_20160202.df <- as.data.frame(as(SST.forecasted_20160202.r, "SpatialPixelsDataFrame"))
+SST.observed_20160202.df <- as.data.frame(as(SST.observed_20160202.r, "SpatialPixelsDataFrame"))
+
+# mask out cook strait region
+SST.forecasted_20160202.df[SST.forecasted_20160202.df$x > 173 & SST.forecasted_20160202.df$y < -41.2,] <- NA # remove Cook Strait points
+SST.observed_20160202.df[SST.observed_20160202.df$x > 173 & SST.observed_20160202.df$y < -41.2,] <- NA # remove Cook Strait points
+
+colnames(SST.observed_20160202.df)[1] <- "SST"
+colnames(SST.forecasted_20160202.df)[1] <- "SST"
+
+
+p3 <- ggplot() +
+  geom_tile(data = SST.observed_20160202.df, aes(x=x, y=y, fill=SST)) + 
+  scale_fill_distiller(palette="Spectral", limits = c(14.35,22.45))+ 
+  geom_sf(data = NZcoastlines.sf, color="black", fill="black") +
+  coord_sf(xlim=c(170, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  labs(fill = "SST") + ggtitle("2016-02-02\nobserved") +
+  theme(plot.title = element_text(size=10),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5), 
+        axis.text = element_text(size = 6)) 
+
+p4 <- ggplot() +
+  geom_tile(data = SST.forecasted_20160202.df, aes(x=x, y=y, fill=SST)) +   
+  scale_fill_distiller(palette="Spectral", limits = c(14.35,22.45))+ 
+  geom_sf(data = NZcoastlines.sf, color="black", fill="black") +
+  coord_sf(xlim=c(170, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  labs(fill = "SST") + ggtitle("2016-02-02\nforecast") +
+  theme(plot.title = element_text(size=10),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5), 
+        axis.text = element_text(size = 6)) 
+
+## NPP plots
+logNPP.forecasted_20140125.r <- raster("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/Spatial prediction maps/NPP rasters/forecasted/logNPP.forecasted_2014-01-25.tif")
+logNPP.observed_20140125.r <- raster("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/Spatial prediction maps/NPP rasters/observed/logNPP.observed_2014-01-25.tif")
+
+# Convert predicted raster to df, so it can be brought in to ggplot more easily
+logNPP.forecasted_20140125.df <- as.data.frame(as(logNPP.forecasted_20140125.r, "SpatialPixelsDataFrame"))
+logNPP.observed_20140125.df <- as.data.frame(as(logNPP.observed_20140125.r, "SpatialPixelsDataFrame"))
+
+# mask out cook strait region
+logNPP.forecasted_20140125.df[logNPP.forecasted_20140125.df$x > 173 & logNPP.forecasted_20140125.df$y < -41.2,] <- NA # remove Cook Strait points
+logNPP.observed_20140125.df[logNPP.observed_20140125.df$x > 173 & logNPP.observed_20140125.df$y < -41.2,] <- NA # remove Cook Strait points
+
+colnames(logNPP.observed_20140125.df)[1] <- "logNPP"
+colnames(logNPP.forecasted_20140125.df)[1] <- "logNPP"
+
+
+p5 <- ggplot() +
+  geom_tile(data = logNPP.observed_20140125.df, aes(x=x, y=y, fill=logNPP)) + 
+  scale_fill_viridis(limits = c(6,9)) +
+  geom_sf(data = NZcoastlines.sf, color="black", fill="black") +
+  coord_sf(xlim=c(170, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  labs(fill = "logNPP") + ggtitle("2014-01-25\nobserved") +
+  theme(plot.title = element_text(size=10),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5), 
+        axis.text = element_text(size = 6)) 
+
+p6 <- ggplot() +
+  geom_tile(data = logNPP.forecasted_20140125.df, aes(x=x, y=y, fill=logNPP)) +   
+  scale_fill_viridis(limits = c(6,9)) +
+  geom_sf(data = NZcoastlines.sf, color="black", fill="black") +
+  coord_sf(xlim=c(170, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  labs(fill = "logNPP") + ggtitle("2014-01-25\nforecast") +
+  theme(plot.title = element_text(size=10),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5), 
+        axis.text = element_text(size = 6)) 
+
+
+logNPP.forecasted_20160202.r <- raster("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/Spatial prediction maps/NPP rasters/forecasted/logNPP.forecasted_2016-02-02.tif")
+logNPP.observed_20160202.r <- raster("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/Spatial prediction maps/NPP rasters/observed/logNPP.observed_2016-02-02.tif")
+
+# Convert predicted raster to df, so it can be brought in to ggplot more easily
+logNPP.forecasted_20160202.df <- as.data.frame(as(logNPP.forecasted_20160202.r, "SpatialPixelsDataFrame"))
+logNPP.observed_20160202.df <- as.data.frame(as(logNPP.observed_20160202.r, "SpatialPixelsDataFrame"))
+
+# mask out cook strait region
+logNPP.forecasted_20160202.df[logNPP.forecasted_20160202.df$x > 173 & logNPP.forecasted_20160202.df$y < -41.2,] <- NA # remove Cook Strait points
+logNPP.observed_20160202.df[logNPP.observed_20160202.df$x > 173 & logNPP.observed_20160202.df$y < -41.2,] <- NA # remove Cook Strait points
+
+colnames(logNPP.observed_20160202.df)[1] <- "logNPP"
+colnames(logNPP.forecasted_20160202.df)[1] <- "logNPP"
+
+
+p7 <- ggplot() +
+  geom_tile(data = logNPP.observed_20160202.df, aes(x=x, y=y, fill=logNPP)) + 
+  scale_fill_viridis(limits = c(6,9)) +
+  geom_sf(data = NZcoastlines.sf, color="black", fill="black") +
+  coord_sf(xlim=c(170, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  labs(fill = "logNPP") + ggtitle("2016-02-02\nobserved") +
+  theme(plot.title = element_text(size=10),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5), 
+        axis.text = element_text(size = 6)) 
+
+p8 <- ggplot() +
+  geom_tile(data = logNPP.forecasted_20160202.df, aes(x=x, y=y, fill=logNPP)) +   
+  scale_fill_viridis(limits = c(6,9)) +
+  geom_sf(data = NZcoastlines.sf, color="black", fill="black") +
+  coord_sf(xlim=c(170, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  labs(fill = "logNPP") + ggtitle("2016-02-02\nforecast") +
+  theme(plot.title = element_text(size=10),
+        axis.title.x=element_blank(), axis.title.y=element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5), 
+        axis.text = element_text(size = 6)) 
+
+
+# COMBINE INTO SINGLE MULTIPANEL PLOT
+SST.multiplot <- ggarrange(p1,p2,p3, p4, common.legend = TRUE, legend = "right", nrow=1)
+
+logNPP.multiplot <- ggarrange(p5,p6,p7, p8, common.legend = TRUE, legend = "right", nrow=1)
+
+combined.multiplot <- plot_grid(SST.multiplot, logNPP.multiplot, nrow = 2)  
+#combined.multiplot
+
+# ggsave(combined.multiplot, file="./forecast models manuscript/plots/exampleforecasts.png",
+#          width = 180, height = 80, units = "mm")
+
+#v2
+SST.multiplot2 <- ggarrange(p1,p2,p3, p4, common.legend = TRUE, legend = "right", ncol = 2, nrow = 2)
+
+logNPP.multiplot2 <- ggarrange(p5,p6,p7, p8, common.legend = TRUE, legend = "right", ncol = 2, nrow = 2)
+
+combined.multiplot2 <- plot_grid(SST.multiplot2, logNPP.multiplot2, ncol = 1)  
+#combined.multiplot
+
+# ggsave(combined.multiplot2, file="./forecast models manuscript/plots/exampleforecasts2.png",
+#          width = 180, height = 220, units = "mm")
+
+
+```
+
+# Fig. 3
+Whale predictive model partial dependence plots
+```{r}
+# PA data data (all sightings and background points)
+PA_AllSightings.df <- read.csv("SightingsBackgroundPoints.RSdata.forecast_Jan2021.csv")
+PA_AllSightings.df$X <- NULL
+# Full model:
+whales.allsightings_BRT <- readRDS("whales.allsightings_BRT2.rds")
+gbm.plot(whales.allsightings_BRT)
+ggPerformance(whales.allsightings_BRT)
+
+# Get pdp values for each, make plots
+WhaleBRT_Depth.pdp <- whales.allsightings_BRT %>%
+  partial(pred.var = "Depth",train=PA_AllSightings.df, n.trees = whales.allsightings_BRT$n.trees, prob = TRUE) %>%
+  #autoplot(color = "blue", size =0.5, alpha = 0.3, rug = TRUE, train = PA_AllSightings.df) +
+  autoplot(color = "transparent", rug = TRUE, train = PA_AllSightings.df) +
+  geom_smooth(color="dark blue", size = 1) +
+  ylim(-0.03,.8) + 
+  xlab("Depth (49.4%)") + theme_classic() + ylab("")
+  
+WhaleBRT_SST.pdp <- whales.allsightings_BRT %>%
+  partial(pred.var = "SST.observed",train=PA_AllSightings.df, n.trees = whales.allsightings_BRT$n.trees, prob = TRUE) %>%
+  autoplot(color = "transparent", rug = TRUE, train = PA_AllSightings.df) +
+  geom_smooth(color="dark blue", size = 1) +
+  ylim(-0.03,.8) + 
+  xlab("SST (14.7%)") + theme_classic() + ylab("")
+
+WhaleBRT_logNPP.pdp <- whales.allsightings_BRT %>%
+  partial(pred.var = "logNPP.observed",train=PA_AllSightings.df, n.trees = whales.allsightings_BRT$n.trees, prob = TRUE) %>%
+  autoplot(color = "transparent", rug = TRUE, train = PA_AllSightings.df) +
+  geom_smooth(color="dark blue", size = 1) +
+  ylim(-0.03,.8) + 
+  xlab("log(NPP) (11.3%)") + theme_classic() + ylab("") 
+
+WhaleBRT_rellogNPP.pdp <- whales.allsightings_BRT %>%
+  partial(pred.var = "Relative.logNPP",train=PA_AllSightings.df, n.trees = whales.allsightings_BRT$n.trees, prob = TRUE) %>%
+  autoplot(color = "transparent", rug = TRUE, train = PA_AllSightings.df) +
+  geom_smooth(color="dark blue", size = 1) +
+  ylim(-0.03,.8) + 
+  xlab("Relative log(NPP) (9.7%)") + theme_classic() + ylab("") 
+
+WhaleBRT_relSST.pdp <- whales.allsightings_BRT %>%
+  partial(pred.var = "Relative.SST",train=PA_AllSightings.df, n.trees = whales.allsightings_BRT$n.trees, prob = TRUE) %>%
+  autoplot(color = "transparent", rug = TRUE, train = PA_AllSightings.df) +
+  geom_smooth(color="dark blue", size = 1) +
+  ylim(-0.03,.8) + 
+  xlab("Relative SST (9.0%)") + theme_classic() + ylab("") 
+
+WhaleBRT_DayofSeason.pdp <- whales.allsightings_BRT %>%
+  partial(pred.var = "DayofSeason",train=PA_AllSightings.df, n.trees = whales.allsightings_BRT$n.trees, prob = TRUE) %>%
+  autoplot(color = "transparent", rug = TRUE, train = PA_AllSightings.df) +
+  geom_smooth(color="dark blue", size = 1) +
+  ylim(-0.03,.8) + 
+  xlab("Day of Season (5.9%)") + theme_classic() + ylab("")
+
+WhalePrediction.pdp <- grid.arrange(WhaleBRT_Depth.pdp, WhaleBRT_SST.pdp, WhaleBRT_logNPP.pdp, WhaleBRT_rellogNPP.pdp,
+                                    WhaleBRT_relSST.pdp, WhaleBRT_DayofSeason.pdp, ncol=1,
+                                    left = textGrob("Probability of presence", rot = 90, vjust = 1))
+
+ggsave(WhalePrediction.pdp, file="./forecast models manuscript/plots/WhaleModel.pdp_v1.png",
+         width = 80, height=180, units = "mm")
+
+WhalePrediction.pdp <- grid.arrange(WhaleBRT_Depth.pdp, WhaleBRT_SST.pdp, WhaleBRT_logNPP.pdp, WhaleBRT_rellogNPP.pdp,
+                                    WhaleBRT_relSST.pdp, WhaleBRT_DayofSeason.pdp, ncol=2,
+                                    left = textGrob("Probability of presence", rot = 90, vjust = 1))
+
+ggsave(WhalePrediction.pdp, file="./forecast models manuscript/plots/WhaleModel.pdp_v2.png",
+         width = 180, height=180, units = "mm")
+
+ggsave(WhalePrediction.pdp, file="./forecast models manuscript/plots/WhaleModel.pdp_v3.png",
+         width = 80, height=100, units = "mm")
+
+
+WhalePrediction.pdp <- grid.arrange(WhaleBRT_Depth.pdp, WhaleBRT_SST.pdp, WhaleBRT_logNPP.pdp, WhaleBRT_rellogNPP.pdp,
+                                    WhaleBRT_relSST.pdp, WhaleBRT_DayofSeason.pdp, ncol=1,
+                                    left = textGrob("Probability of presence", rot = 90, vjust = 1))
+
+ggsave(WhalePrediction.pdp, file="./forecast models manuscript/plots/WhaleModel.pdp_v4.png",
+         width = 80, height=180, units = "mm")
+
+```
+
+# Fig. 4
+Available habitat, true positive rate, false negative rate at varying thresholds for "suitable habitat"
+```{r}
+
+# get all values from sighting/background locs in dfs
+predvalues.background.list <- readRDS("predvalues.background.list.rds")
+predvalues.sightings.list <- readRDS("predvalues.sightings.list.rds")
+
+predvalues.sightings.df <- as.data.frame(Reduce(c,predvalues.sightings.list))
+colnames(predvalues.sightings.df) <- "pred"
+predvalues.background.df <- as.data.frame(Reduce(c,predvalues.background.list))
+colnames(predvalues.background.df) <- "pred"
+
+# At treshold = 0.4: 
+# availability of habitat
+length(predvalues.background.df$pred[predvalues.background.df$pred>0.4])/length(predvalues.background.df$pred) 
+# true positive rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred>0.4])/length(predvalues.sightings.df$pred) 
+# false negative rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred<0.4])/length(predvalues.sightings.df$pred) 
+
+# Read in performance at each threshold 
+perf.at.thresh.df <- read.csv("WhaleModel.Performance.at.thresh.df.csv")
+
+# PLOT
+perf.at.thresh.plot <- ggplot(data = perf.at.thresh.df, aes(x=thresholds)) +
+  geom_line(aes(y=avh, color="Proportion of habitat"), size=1.2) +
+  geom_line(aes(y=fnr, color="False negative rate"), size=1.2)  +
+  geom_line(aes(y=tpr, color="True positive rate"), size=1.2) + 
+  geom_hline(yintercept = 0.3, linetype = "dashed", color="dark gray") +
+  geom_vline(xintercept = 0.4, linetype = "dashed", color="dark gray") +
+  scale_color_manual(name = "",
+    breaks=c("Proportion of habitat", "False negative rate", "True positive rate"),
+    values = c("black","dark blue", "dark green")) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  xlab("Threshold") + ylab("") + theme_classic() #+
+  #theme(legend.position=c(.9, .56))
+
+perf.at.thresh.plot
+
+ggsave(perf.at.thresh.plot, file="./forecast models manuscript/plots/WhaleModel.perf.at.thresh.png",
+         width = 180, height=80, units = "mm")
+
+
+```
+
+
+# Fig. 5
+Example spatial predictions of blue whale presence
+```{r}
+predlayers.list <- readRDS("predlayers.list.rds")
+
+#names(predlayers.list)
+
+predhabitat.plots <- list()
+exampledays <- c(16,108)
+for (i in exampledays) {
+  
+  # get polygons of 0.4 contour
+  predpoly_i.sp <- rasterToPolygons(clump(predlayers.list[[i]] > 0.4), dissolve = TRUE)
+  
+  # calculate area of each polygon (does not need to be projected)
+  predpoly_i.sp$area_sqkm <- area(predpoly_i.sp)/1000000
+
+  # remove polygons where area is < 100 square km, i.e. areas smaller than 10km x 10km
+  predpoly_i.sp.sub <- subset(predpoly_i.sp, area_sqkm > 100)
+
+  predpoly_i.sf <- st_as_sf(predpoly_i.sp.sub)
+  
+  predlayer_i.df <- as.data.frame(as(predlayers.list[[i]], "SpatialPixelsDataFrame"))
+
+
+  predhabitat.plot_i <- ggplot() +
+    geom_tile(data = predlayer_i.df, aes(x=x, y=y, fill=layer)) +
+    scale_fill_viridis(option = "inferno") +
+    geom_sf(data=predpoly_i.sf, color="white", fill="transparent") +
+    # geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="dark gray") +
+    # coord_sf(xlim=c(170.4,175.2), ylim=c(-42.05,-39.25)) +
+    geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+    coord_sf(xlim=c(170.4, 175.2), ylim=c(-42.05, -39.3)) +
+    scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+    xlab("") + ylab("") + labs(fill = "Probability\nof presence") +
+    #ggtitle(paste(names(predlayers.list[i]))) + 
+    annotate(geom = "text", y=-39.4, x=170.9, label = paste(names(predlayers.list[i]))) +
+    theme_bw()
+
+    
+  predhabitat.plots[[i]] <- predhabitat.plot_i
+  
+}
+
+#predhabitat.plots
+
+predhabitat.examples <- ggarrange(predhabitat.plots[[108]], predhabitat.plots[[16]],
+                                  ncol=1, nrow = 2, common.legend = TRUE, legend = "right")
+#predhabitat.examples
+
+ggsave(predhabitat.examples, file="./forecast models manuscript/plots/predhabitat.examplesv2.png",
+         width = 180, height=200, units = "mm")
+
+
+```
+
+
+# Fig. 6
+Mean predicted suitable habitat
+```{r}
+
+# calculate mean and sd of predicted habitat suitability across all runs, number of occurrences of pred>0.5 for each cell
+predhabitat.mean <- mean(stack(predlayers.list))
+predhabitat.sd <- calc(stack(predlayers.list), fun=function(x){sd(x)})
+
+
+# get polygons of 0.4 contour
+predpoly_mean.sp <- rasterToPolygons(clump(predhabitat.mean > 0.4), dissolve = TRUE)
+# calculate area of each polygon (does not need to be projected)
+predpoly_mean.sp$area_sqkm <- area(predpoly_mean.sp)/1000000
+# remove polygons where area is < 100 square km, i.e. areas smaller than 10km x 10km
+predpoly_mean.sp.sub <- subset(predpoly_mean.sp, area_sqkm > 100)
+predpoly_mean.sf <- st_as_sf(predpoly_mean.sp.sub)
+
+# ggplot
+predhabitat.mean.df <- as.data.frame(as(predhabitat.mean, "SpatialPixelsDataFrame"))
+predhabitat.sd.df <- as.data.frame(as(predhabitat.sd, "SpatialPixelsDataFrame"))
+
+predhabitat.mean.plot <- ggplot() +
+  geom_tile(data = predhabitat.mean.df, aes(x=x, y=y, fill=layer)) +
+  scale_fill_viridis(option = "inferno") +
+  geom_sf(data=predpoly_mean.sf, color="white", fill="transparent") +
+  geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+  coord_sf(xlim=c(170.4, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  xlab("") + ylab("") + labs(fill = "Mean\nprobability\nof presence   ") +
+  theme_bw()
+
+predhabitat.sd.plot <- ggplot() +
+  geom_tile(data = predhabitat.sd.df, aes(x=x, y=y, fill=layer)) +
+  scale_fill_viridis() +
+  geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+  coord_sf(xlim=c(170.4, 175.2), ylim=c(-42.05, -39.3)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  xlab("") + ylab("") + labs(fill = "SD(probability\nof presence)") +
+  theme_bw()
+
+predhabitat.summary <- ggarrange(predhabitat.mean.plot, predhabitat.sd.plot, nrow = 2)
+predhabitat.summary
+
+ggsave(predhabitat.summary, file="./forecast models manuscript/plots/predhabitat.summaryv4.png",
+         width = 180, height=200, units = "mm")
+
+
+```
+
+# Anthropogenic pressures map
+```{r}
+# petroleum data shapefiles downloaded from: http://data.nzpam.govt.nz/permitwebmaps/?commodity=petroleum
+# mineral data shapefiles downloaded from: http://data.nzpam.govt.nz/permitwebmaps/?commodity=minerals 
+
+PetroleumWells <- readOGR("./petroleum permit areas shapefiles/Petroleum_Wells.shp")
+PetroleumActivePermits <- readOGR("./petroleum permit areas shapefiles/Petroleum_Active_Permits.shp")
+MineralActivePermits <- readOGR("./mineral permit areas shapefiles/Mineral_Active_Permits.shp")
+
+rigs <- read.csv("oil_rig_locations.csv")
+ports <- read.csv("port locations.csv")
+
+NZcoastlines <- spTransform(NZcoastlines, CRS('+proj=longlat +datum=WGS84'))
+NZcoastlines.sf <- st_as_sf(NZcoastlines)
+
+PetroleumWells <- spTransform(PetroleumWells, CRS('+proj=longlat +datum=WGS84'))
+PetroleumActivePermits <- spTransform(PetroleumActivePermits, CRS('+proj=longlat +datum=WGS84'))
+MineralActivePermits <- spTransform(MineralActivePermits, CRS('+proj=longlat +datum=WGS84'))
+
+PetroleumWells.sf <- st_as_sf(PetroleumWells)
+PetroleumActivePermits.sf <- st_as_sf(PetroleumActivePermits)
+MineralActivePermits.sf <- st_as_sf(MineralActivePermits)
+
+# remove areas on land
+PetroleumWells.noland <- st_difference(PetroleumWells.sf, st_union(NZcoastlines.sf))
+PetroleumActivePermits.noland <- st_difference(PetroleumActivePermits.sf, st_union(NZcoastlines.sf))
+MineralActivePermits.noland <- st_difference(MineralActivePermits.sf, st_union(NZcoastlines.sf))
+
+unique(PetroleumActivePermits.noland$PERMIT_TYP)
+PetroleumActivePermits.noland$permit_type <- NA
+PetroleumActivePermits.noland$permit_type[PetroleumActivePermits.noland$PERMIT_TYP=="Mining Permit"] <- "Petroleum mining permit"
+PetroleumActivePermits.noland$permit_type[PetroleumActivePermits.noland$PERMIT_TYP=="Mining Licence"] <- "Petroleum mining license"
+PetroleumActivePermits.noland$permit_type[PetroleumActivePermits.noland$PERMIT_TYP=="Exploration Permit"] <- "Petroleum exploration permit"
+
+unique(MineralActivePermits.noland$PERMIT_TYP)
+MineralActivePermits.noland$permit_type <- NA
+MineralActivePermits.noland$permit_type[MineralActivePermits.noland$PERMIT_TYP=="Mining Permit"] <- "Mineral mining permit"
+MineralActivePermits.noland$permit_type[MineralActivePermits.noland$PERMIT_TYP=="Exploration Permit"] <- "Mineral exploration permit"
+
+ggplot() +
+  geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+  geom_sf(data=PetroleumActivePermits.noland, aes(color=permit_type, fill=permit_type), alpha=0.3) +
+  geom_sf(data=MineralActivePermits.noland, aes(color=permit_type, fill=permit_type), alpha=0.3) +
+  scale_color_manual(values = pnw_palette("Sailboat", n=5, type="discrete")) +
+  scale_fill_manual(values = pnw_palette("Sailboat", n=5, type="discrete")) +
+  geom_sf(data=PetroleumWells.noland[PetroleumWells.noland$WELLBORE_S=="producing",],shape=24, fill="red") +
+  geom_point(data = ports, aes(x=Lon, y=Lat), shape=22, fill="blue", size=2) +
+  coord_sf(xlim=c(170.4, 175.2), ylim=c(-42.05, -39)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  xlab("") + ylab("") +  
+  theme_bw()
+
+```
+
+```{r}
+
+predhabitat.mean_anthro.plot <- ggplot() +
+  geom_tile(data = predhabitat.mean.df, aes(x=x, y=y, fill=layer)) +
+  scale_fill_viridis(option = "inferno") +
+  geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+  geom_sf(data=PetroleumActivePermits.noland, aes(color=permit_type), size=1.2, alpha=0.3) +
+  geom_sf(data=MineralActivePermits.noland, aes(color=permit_type), size=1.2, alpha=0.3) +
+  scale_color_manual(values = pnw_palette("Sailboat", n=5, type="discrete")) +
+  geom_sf(data=PetroleumWells.noland[PetroleumWells.noland$WELLBORE_S=="producing",],shape=24, fill="red") +
+  geom_point(data = ports, aes(x=Lon, y=Lat), shape=22, fill="blue", size=2) +
+  coord_sf(xlim=c(170.4, 175.2), ylim=c(-42.25, -39)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  xlab("") + ylab("") + labs(fill = "Mean\nprobability\nof presence", color="Permit type") +
+  theme_bw() + theme(legend.justification = "left")
+
+
+predhabitat.sd_anthro.plot <- ggplot() +
+  geom_tile(data = predhabitat.sd.df, aes(x=x, y=y, fill=layer)) +
+  scale_fill_viridis() +
+  geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+  geom_sf(data=PetroleumActivePermits.noland, aes(color=permit_type), size=1.2, alpha=0.3) +
+  geom_sf(data=MineralActivePermits.noland, aes(color=permit_type), size=1.2, alpha=0.3) +
+  scale_color_manual(values = pnw_palette("Sailboat", n=5, type="discrete")) +
+  geom_sf(data=PetroleumWells.noland[PetroleumWells.noland$WELLBORE_S=="producing",],shape=24, fill="red") +
+  geom_point(data = ports, aes(x=Lon, y=Lat), shape=22, fill="blue", size=2) +
+  coord_sf(xlim=c(170.4, 175.2), ylim=c(-42.25, -39)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  xlab("") + ylab("") + labs(fill = "SD(probability\nof presence)") + guides(color="none") +
+  theme_bw() + theme(legend.justification = "left")
+
+
+predhabitat.summary <- ggarrange(predhabitat.mean_anthro.plot, predhabitat.sd_anthro.plot, nrow = 2, align = "hv")
+predhabitat.summary
+
+ggsave(predhabitat.summary, file="./forecast models manuscript/plots/predhabitat.summaryv5.png",
+         width = 180, height=200, units = "mm")
+
+
+```
+
+
+# SUPPLEMENTAL MATERIALS
+# Fig. S1:
+Map of CTD cast locations
+```{r}
+
+# Bring in CTD data 
+CTDcasts.all.df <- read.csv("CTDcasts_RSdata_20200203.df")
+
+# Plot CTD locations on map
+CTDmap <- ggplot() +
+  geom_point(data = CTDcasts.all.df, aes(x=Lon, y=Lat, color=as.factor(Year)), 
+             size = 1, shape=3) + scale_color_manual(values = c("turquoise","dark red","blue")) +
+  #geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="dark gray") +
+  #coord_quickmap(xlim=c(170.5,175.2), ylim=c(-42,-38.5)) + 
+  geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+  coord_sf(xlim=c(170.5,175.2), ylim=c(-42,-38.5)) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  facet_wrap(.~Year) +
+  xlab("Longitude") + ylab("Latitude") + theme_bw() + theme(legend.position = "none")
+
+CTDmap
+
+ggsave(CTDmap, file="./forecast models manuscript/plots/CTDmap.png",
+         width = 180, height = 80, units = "mm")
+```
+
+
+# Fig. S2:
+CTD-RS data comparison
+```{r}
+
+CTDcasts.all.df
+
+insitupredcols <- c(18,15,24,47,37,38,33)
+insitupreds <- c("diffS", "intT", "mld", "Pycnocline", "ThS", "ThR", "TT")
+insitupreds.full <- c("Difference in salinity", "Integral of temperature", "Mixed layer depth", "Pycnocline depth", "Thermocline strength", "Thermocline thickness", "Thermocline temperature")
+
+insitupreds.df <- as.data.frame(cbind(insitupredcols, insitupreds, insitupreds.full))
+
+
+# loop for LMs: 
+SSTlms <- list()
+for (i in insitupredcols) {
+  lm.i <- lm(CTDcasts.all.df[,i] ~ CTDcasts.all.df$SST_1d)
+  lm.i_summary <- summary(lm.i)
+  
+  SSTlms[[i]] <- lm.i_summary
+}
+
+logNPPlms <- list()
+for (i in insitupredcols) {
+  lm.i <- lm(CTDcasts.all.df[,i] ~ log(CTDcasts.all.df$NPP_8d))
+  lm.i_summary <- summary(lm.i)
+  
+  logNPPlms[[i]] <- lm.i_summary
+}
+
+#SST
+SST_diffS.p <- ggplot(data = CTDcasts.all.df, aes(y=diffS, x=SST_1d)) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("Difference\nin salinity") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p =",round(SSTlms[[18]]$coefficients[2,4],3),", ","r-squared=",round(SSTlms[[18]]$r.squared, 3)))
+
+SST_intT.p <- ggplot(data = CTDcasts.all.df, aes(y=intT, x=SST_1d)) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("Integral of\ntemperature") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p < 0.001",", ","r-squared =",round(SSTlms[[15]]$r.squared, 3))) 
+  
+SST_mld.p <- ggplot(data = CTDcasts.all.df, aes(y=mld, x=SST_1d)) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("Mixed layer\ndepth") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p < 0.001",", ","r-squared =",round(SSTlms[[24]]$r.squared, 3))) 
+  
+SST_pycn.p <- ggplot(data = CTDcasts.all.df, aes(y=Pycnocline, x=SST_1d)) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("Pycnocline\ndepth") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p =",round(SSTlms[[47]]$coefficients[2,4],3),", ","r-squared=",round(SSTlms[[47]]$r.squared, 3)))
+
+SST_ThS.p <- ggplot(data = CTDcasts.all.df, aes(y=ThS, x=SST_1d)) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("Thermocline\nstrength") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p < 0.001",", ","r-squared =",round(SSTlms[[37]]$r.squared, 3))) 
+
+SST_ThT.p <- ggplot(data = CTDcasts.all.df, aes(y=ThT, x=SST_1d)) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("Thermocline\nthickness") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p =",round(SSTlms[[38]]$coefficients[2,4],3),", ","r-squared=",round(SSTlms[[38]]$r.squared, 3)))
+
+SST_TT.p <- ggplot(data = CTDcasts.all.df, aes(y=TT, x=SST_1d)) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("Thermocline\ntemperature") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p < 0.001",", ","r-squared =",round(SSTlms[[33]]$r.squared, 3))) 
+ 
+SST_insitu.multipanel <- grid.arrange(SST_diffS.p,SST_intT.p,SST_mld.p,SST_pycn.p,SST_ThS.p,SST_ThT.p,SST_TT.p, ncol=1, bottom = textGrob("SST"))
+
+#NPP
+logNPP_diffS.p <- ggplot(data = CTDcasts.all.df, aes(y=diffS, x=log(NPP_8d))) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p =",round(logNPPlms[[18]]$coefficients[2,4],3),", ","r-squared=",round(logNPPlms[[18]]$r.squared, 3)))
+
+logNPP_intT.p <- ggplot(data = CTDcasts.all.df, aes(y=intT, x=log(NPP_8d))) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p < 0.001",", ","r-squared =",round(logNPPlms[[15]]$r.squared, 3))) 
+  
+logNPP_mld.p <- ggplot(data = CTDcasts.all.df, aes(y=mld, x=log(NPP_8d))) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p =",round(logNPPlms[[24]]$coefficients[2,4],3),", ","r-squared=",round(logNPPlms[[24]]$r.squared, 3)))
+
+logNPP_pycn.p <- ggplot(data = CTDcasts.all.df, aes(y=Pycnocline, x=log(NPP_8d))) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p =",round(logNPPlms[[47]]$coefficients[2,4],3),", ","r-squared=",round(logNPPlms[[47]]$r.squared, 3)))
+
+logNPP_ThS.p <- ggplot(data = CTDcasts.all.df, aes(y=ThS, x=log(NPP_8d))) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p < 0.001",", ","r-squared =",round(logNPPlms[[37]]$r.squared, 3))) 
+
+logNPP_ThT.p <- ggplot(data = CTDcasts.all.df, aes(y=ThT, x=log(NPP_8d))) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p < 0.001",", ","r-squared =",round(logNPPlms[[38]]$r.squared, 3))) 
+
+logNPP_TT.p <- ggplot(data = CTDcasts.all.df, aes(y=TT, x=log(NPP_8d))) +
+    geom_point(aes(color=as.factor(Year)), alpha=0.3) + 
+    geom_smooth(method = "lm", color="dark gray")+
+    scale_color_manual(values = c("turquoise","dark red","blue")) +
+    ylab("") + xlab("") +
+    theme_classic() + theme(legend.position = "none") +
+    annotate(geom = "text", y=Inf, x=-Inf, hjust = -0.05, vjust = 1,
+             label = paste("p < 0.001",", ","r-squared =",round(logNPPlms[[33]]$r.squared, 3))) 
+ 
+logNPP_insitu.multipanel <- grid.arrange(logNPP_diffS.p,logNPP_intT.p,logNPP_mld.p,logNPP_pycn.p,logNPP_ThS.p,logNPP_ThT.p,logNPP_TT.p, ncol=1, bottom = textGrob("log(NPP)"))
+
+
+
+
+# Combine and save
+insitu_rs.multipanel <- grid.arrange(SST_insitu.multipanel, logNPP_insitu.multipanel, ncol=2)
+
+ggsave(insitu_rs.multipanel, file="./forecast models manuscript/plots/insitu_rs.multipanelv1.png",
+         width = 180, height = 225, units = "mm")
+
+```
+
+# Fig. S3: 
+Functional response curves for environmental forecast models, with all three regions plotted together
+```{r}
+# Read in models 
+SSTwest_BRT <- readRDS("SSTwest_BRT.rds")
+SSTcentral_BRT <- readRDS("SSTcentral_BRT.rds")
+SSTeast_BRT <- readRDS("SSTeast_BRT.rds")
+
+logNPPwest_BRT <- readRDS("logNPPwest_BRT.rds")
+logNPPcentral_BRT <- readRDS("logNPPcentral_BRT.rds")
+logNPPeast_BRT <- readRDS("logNPPeast_BRT.rds")
+
+gridSTB.west.df <- read.csv("gridSTB.west.df_RSdata_Jan2021.csv")
+gridSTB.central.df <- read.csv("gridSTB.central.df_RSdata_Jan2021.csv")
+gridSTB.east.df <- read.csv("gridSTB.east.df_RSdata_Jan2021.csv")
+
+gridSTB.west.df$X <- NULL
+gridSTB.central.df$X <- NULL
+gridSTB.east.df$X <- NULL
+
+## Partition into training and test datasets
+Dates.all <- unique(gridSTB.west.df$Date)
+length(Dates.all)
+0.2*1822 # randomly sample 364 dates for test dataset
+set.seed(123)
+Dates.test <- sample(Dates.all, size=364, replace=F)
+Dates.training <- Dates.all[! Dates.all %in% Dates.test]
+
+gridSTB.west.training <- filter(gridSTB.west.df, Date %in% Dates.training)
+gridSTB.central.training <- filter(gridSTB.central.df, Date %in% Dates.training)
+gridSTB.east.training <- filter(gridSTB.east.df, Date %in% Dates.training)
+
+# Make quick plot of response curves
+gbm.plot(SSTwest_BRT)
+gbm.plot(SSTcentral_BRT)
+gbm.plot(SSTeast_BRT)
+
+# Get pdp values for each 
+SSTwest_DayofSeason.pdp <- partial(SSTwest_BRT, pred.var = "DayofSeason", train = gridSTB.west.training, n.trees = SSTwest_BRT$n.trees)
+SSTwest_SSTanom.pdp <- partial(SSTwest_BRT, pred.var = "SSTanommonthly_1wkprior", train = gridSTB.west.training, n.trees = SSTwest_BRT$n.trees)
+SSTwest_Upwelling.pdp <- partial(SSTwest_BRT, pred.var = "Upwellingmonthly_1wkprior", train = gridSTB.west.training, n.trees = SSTwest_BRT$n.trees)
+SSTwest_Windsum.pdp <- partial(SSTwest_BRT, pred.var = "Windsum30d_1wkprior", train = gridSTB.west.training, n.trees = SSTwest_BRT$n.trees)
+SSTwest_Depth.pdp <- partial(SSTwest_BRT, pred.var = "Depth", train = gridSTB.west.training, n.trees = SSTwest_BRT$n.trees)
+SSTwest_Windspeed.pdp <- partial(SSTwest_BRT, pred.var = "Windweekly_1wkprior", train = gridSTB.west.training, n.trees = SSTwest_BRT$n.trees)
+SSTwest_DistToCoast.pdp <- partial(SSTwest_BRT, pred.var = "DistToCoast", train = gridSTB.west.training, n.trees = SSTwest_BRT$n.trees)
+SSTwest_Lat.pdp <- partial(SSTwest_BRT, pred.var = "Lat", train = gridSTB.west.training, n.trees = SSTwest_BRT$n.trees)
+SSTwest_Lon.pdp <- partial(SSTwest_BRT, pred.var = "Lon", train = gridSTB.west.training, n.trees = SSTwest_BRT$n.trees)
+
+SSTcentral_DayofSeason.pdp <- partial(SSTcentral_BRT, pred.var = "DayofSeason", train = gridSTB.central.training, n.trees = SSTcentral_BRT$n.trees)
+SSTcentral_SSTanom.pdp <- partial(SSTcentral_BRT, pred.var = "SSTanommonthly_2wkprior", train = gridSTB.central.training, n.trees = SSTcentral_BRT$n.trees)
+SSTcentral_Upwelling.pdp <- partial(SSTcentral_BRT, pred.var = "Upwellingmonthly_2wkprior", train = gridSTB.central.training, n.trees = SSTcentral_BRT$n.trees)
+SSTcentral_Windsum.pdp <- partial(SSTcentral_BRT, pred.var = "Windsum30d_2wkprior", train = gridSTB.central.training, n.trees = SSTcentral_BRT$n.trees)
+SSTcentral_Depth.pdp <- partial(SSTcentral_BRT, pred.var = "Depth", train = gridSTB.central.training, n.trees = SSTcentral_BRT$n.trees)
+SSTcentral_Windspeed.pdp <- partial(SSTcentral_BRT, pred.var = "Windweekly_2wkprior", train = gridSTB.central.training, n.trees = SSTcentral_BRT$n.trees)
+SSTcentral_DistToCoast.pdp <- partial(SSTcentral_BRT, pred.var = "DistToCoast", train = gridSTB.central.training, n.trees = SSTcentral_BRT$n.trees)
+SSTcentral_Lat.pdp <- partial(SSTcentral_BRT, pred.var = "Lat", train = gridSTB.central.training, n.trees = SSTcentral_BRT$n.trees)
+SSTcentral_Lon.pdp <- partial(SSTcentral_BRT, pred.var = "Lon", train = gridSTB.central.training, n.trees = SSTcentral_BRT$n.trees)
+
+SSTeast_DayofSeason.pdp <- partial(SSTeast_BRT, pred.var = "DayofSeason", train = gridSTB.east.training, n.trees = SSTeast_BRT$n.trees)
+SSTeast_SSTanom.pdp <- partial(SSTeast_BRT, pred.var = "SSTanommonthly_3wkprior", train = gridSTB.east.training, n.trees = SSTeast_BRT$n.trees)
+SSTeast_Upwelling.pdp <- partial(SSTeast_BRT, pred.var = "Upwellingmonthly_3wkprior", train = gridSTB.east.training, n.trees = SSTeast_BRT$n.trees)
+SSTeast_Windsum.pdp <- partial(SSTeast_BRT, pred.var = "Windsum30d_3wkprior", train = gridSTB.east.training, n.trees = SSTeast_BRT$n.trees)
+SSTeast_Depth.pdp <- partial(SSTeast_BRT, pred.var = "Depth", train = gridSTB.east.training, n.trees = SSTeast_BRT$n.trees)
+SSTeast_Windspeed.pdp <- partial(SSTeast_BRT, pred.var = "Windweekly_3wkprior", train = gridSTB.east.training, n.trees = SSTeast_BRT$n.trees)
+SSTeast_DistToCoast.pdp <- partial(SSTeast_BRT, pred.var = "DistToCoast", train = gridSTB.east.training, n.trees = SSTeast_BRT$n.trees)
+SSTeast_Lat.pdp <- partial(SSTeast_BRT, pred.var = "Lat", train = gridSTB.east.training, n.trees = SSTeast_BRT$n.trees)
+SSTeast_Lon.pdp <- partial(SSTeast_BRT, pred.var = "Lon", train = gridSTB.east.training, n.trees = SSTeast_BRT$n.trees)
+
+
+
+
+SST_DayofSeason.pdp <- ggplot() +
+  # geom_line(data = SSTwest_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="dark green", linetype="dotted") +
+  # geom_line(data = SSTcentral_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="blue", linetype="dotted") +
+  # geom_line(data = SSTeast_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="purple", linetype="dotted") + 
+  # 
+  geom_smooth(data = SSTwest_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="dark green") +
+  geom_smooth(data = SSTcentral_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="blue") +
+  geom_smooth(data = SSTeast_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="purple") + 
+
+  geom_rug(data = SSTwest_DayofSeason.pdp, aes(x=DayofSeason), color="dark green", sides = "b") +
+  geom_rug(data = SSTcentral_DayofSeason.pdp, aes(x=DayofSeason), color="blue", sides = "b") +
+  geom_rug(data = SSTeast_DayofSeason.pdp, aes(x=DayofSeason), color="purple", sides = "b") + 
+
+  ylim(14.5,19) + xlab("Day of Season") + ylab("Fitted function") +
+  theme_classic()
+
+SST_SSTanom.pdp <- ggplot() +
+  geom_smooth(data = SSTwest_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_1wkprior), color="dark green") +
+  geom_smooth(data = SSTcentral_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_2wkprior), color="blue") +
+  geom_smooth(data = SSTeast_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_3wkprior), color="purple") + 
+  
+  geom_rug(data = SSTwest_SSTanom.pdp, aes(x=SSTanommonthly_1wkprior), color="dark green", sides = "b") +
+  geom_rug(data = SSTcentral_SSTanom.pdp, aes(x=SSTanommonthly_2wkprior), color="blue", sides = "b") +
+  geom_rug(data = SSTeast_SSTanom.pdp, aes(x=SSTanommonthly_3wkprior), color="purple", sides = "b") + 
+  
+  ylim(14.5,19) + xlab("SST anomaly") + ylab("Fitted function") +
+  theme_classic()
+
+SST_Upwelling.pdp <- ggplot() +
+  geom_smooth(data = SSTwest_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_1wkprior), color="dark green") +
+  geom_smooth(data = SSTcentral_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_2wkprior), color="blue") +
+  geom_smooth(data = SSTeast_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_3wkprior), color="purple") + 
+  
+  geom_rug(data = SSTwest_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_1wkprior), color="dark green", sides = "b") +
+  geom_rug(data = SSTcentral_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_2wkprior), color="blue", sides = "b") +
+  geom_rug(data = SSTeast_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_3wkprior), color="purple", sides = "b") + 
+  
+  ylim(14.5,19) + xlab("Upwelling index") + ylab("Fitted function") +
+  theme_classic()
+
+SST_Windsum.pdp <- ggplot() +
+  geom_smooth(data = SSTwest_Windsum.pdp, aes(y=yhat, x=Windsum30d_1wkprior), color="dark green") +
+  geom_smooth(data = SSTcentral_Windsum.pdp, aes(y=yhat, x=Windsum30d_2wkprior), color="blue") +
+  geom_smooth(data = SSTeast_Windsum.pdp, aes(y=yhat, x=Windsum30d_3wkprior), color="purple") + 
+  
+  geom_rug(data = SSTwest_Windsum.pdp, aes(y=yhat, x=Windsum30d_1wkprior), color="dark green", sides = "b") +
+  geom_rug(data = SSTcentral_Windsum.pdp, aes(y=yhat, x=Windsum30d_2wkprior), color="blue", sides = "b") +
+  geom_rug(data = SSTeast_Windsum.pdp, aes(y=yhat, x=Windsum30d_3wkprior), color="purple", sides = "b") + 
+  
+  ylim(14.5,19) + xlab("Prior wind input") + ylab("Fitted function") +
+  theme_classic()
+
+SST_Windspeed.pdp <- ggplot() +
+  geom_smooth(data = SSTwest_Windspeed.pdp, aes(y=yhat, x=Windweekly_1wkprior), color="dark green") +
+  geom_smooth(data = SSTcentral_Windspeed.pdp, aes(y=yhat, x=Windweekly_2wkprior), color="blue") +
+  geom_smooth(data = SSTeast_Windspeed.pdp, aes(y=yhat, x=Windweekly_3wkprior), color="purple") + 
+  
+  geom_rug(data = SSTwest_Windspeed.pdp, aes(y=yhat, x=Windweekly_1wkprior), color="dark green", sides = "b") +
+  geom_rug(data = SSTcentral_Windspeed.pdp, aes(y=yhat, x=Windweekly_2wkprior), color="blue", sides = "b") +
+  geom_rug(data = SSTeast_Windspeed.pdp, aes(y=yhat, x=Windweekly_3wkprior), color="purple", sides = "b") + 
+  
+  ylim(14.5,19) + xlab("Mean wind speed (m/s)") + ylab("Fitted function") +
+  theme_classic()
+
+SST_Depth.pdp <- ggplot() +
+  geom_smooth(data = SSTwest_Depth.pdp, aes(y=yhat, x=Depth), color="dark green") +
+  geom_smooth(data = SSTcentral_Depth.pdp, aes(y=yhat, x=Depth), color="blue") +
+  geom_smooth(data = SSTeast_Depth.pdp, aes(y=yhat, x=Depth), color="purple") + 
+  
+  geom_rug(data = SSTwest_Depth.pdp, aes(y=yhat, x=Depth), color="dark green", sides = "b") +
+  geom_rug(data = SSTcentral_Depth.pdp, aes(y=yhat, x=Depth), color="blue", sides = "b") +
+  geom_rug(data = SSTeast_Depth.pdp, aes(y=yhat, x=Depth), color="purple", sides = "b") + 
+  
+  ylim(14.5,19) + xlab("Depth (m)") + ylab("Fitted function") +
+  theme_classic()
+
+SST_DistToCoast.pdp <- ggplot() +
+  geom_smooth(data = SSTwest_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="dark green") +
+  geom_smooth(data = SSTcentral_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="blue") +
+  geom_smooth(data = SSTeast_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="purple") + 
+  
+  geom_rug(data = SSTwest_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="dark green", sides = "b") +
+  geom_rug(data = SSTcentral_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="blue", sides = "b") +
+  geom_rug(data = SSTeast_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="purple", sides = "b") + 
+  
+  ylim(14.5,19) + xlab("Distance to coast (km)") + ylab("Fitted function") +
+  theme_classic()
+
+SST_Lat.pdp <- ggplot() +
+  geom_smooth(data = SSTwest_Lat.pdp, aes(y=yhat, x=Lat), color="dark green") +
+  geom_smooth(data = SSTcentral_Lat.pdp, aes(y=yhat, x=Lat), color="blue") +
+  geom_smooth(data = SSTeast_Lat.pdp, aes(y=yhat, x=Lat), color="purple") + 
+  
+  geom_rug(data = SSTwest_Lat.pdp, aes(y=yhat, x=Lat), color="dark green", sides = "b") +
+  geom_rug(data = SSTcentral_Lat.pdp, aes(y=yhat, x=Lat), color="blue", sides = "b") +
+  geom_rug(data = SSTeast_Lat.pdp, aes(y=yhat, x=Lat), color="purple", sides = "b") + 
+  
+  ylim(14.5,19) + xlab("Latitude") + ylab("Fitted function") +
+  theme_classic()
+
+SST_Lon.pdp <- ggplot() +
+  geom_smooth(data = SSTwest_Lon.pdp, aes(y=yhat, x=Lon), color="dark green") +
+  geom_smooth(data = SSTcentral_Lon.pdp, aes(y=yhat, x=Lon), color="blue") +
+  geom_smooth(data = SSTeast_Lon.pdp, aes(y=yhat, x=Lon), color="purple") + 
+  
+  geom_rug(data = SSTwest_Lon.pdp, aes(y=yhat, x=Lon), color="dark green", sides = "b") +
+  geom_rug(data = SSTcentral_Lon.pdp, aes(y=yhat, x=Lon), color="blue", sides = "b") +
+  geom_rug(data = SSTeast_Lon.pdp, aes(y=yhat, x=Lon), color="purple", sides = "b") +
+  
+  ylim(14.5,19) + xlab("Longitude") + ylab("Fitted function") +
+  theme_classic()
+
+SSTforecast.pdp <- grid.arrange(SST_DayofSeason.pdp, SST_SSTanom.pdp, SST_Upwelling.pdp, SST_Windsum.pdp, SST_Windspeed.pdp, SST_Depth.pdp, 
+                                SST_DistToCoast.pdp, SST_Lat.pdp, SST_Lon.pdp, ncol=3, nrow=3)
+
+ggsave(SSTforecast.pdp, file="./forecast models manuscript/plots/SSTforecast.pdp.png",
+         width = 180, height = 120, units = "mm")
+
+ggInfluence(SSTwest_BRT)
+ggInfluence(SSTcentral_BRT)
+ggInfluence(SSTeast_BRT)
+
+
+# FIX RUG PLOTS! HERE'S ONE WAY HOW:
+gridSTB.west.training$ypos <- 14.5
+gridSTB.central.training$ypos <- 14.55
+gridSTB.east.training$ypos <- 14.6
+
+ggplot() +
+  geom_smooth(data = SSTwest_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_1wkprior), color="dark green") +
+  geom_smooth(data = SSTcentral_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_2wkprior), color="blue") +
+  geom_smooth(data = SSTeast_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_3wkprior), color="purple") + 
+  
+  geom_point(data = gridSTB.west.training, aes(x=SSTanommonthly_1wkprior, y=ypos), color="dark green", shape="|") +
+  geom_point(data = gridSTB.central.training, aes(x=SSTanommonthly_2wkprior, y=ypos), color="blue", shape="|") +
+  geom_point(data = gridSTB.east.training, aes(x=SSTanommonthly_3wkprior, y=ypos), color="purple", shape="|") +
+  
+  ylim(14.5,19) + xlab("SST anomaly") + ylab("Fitted function") +
+  theme_classic()
+
+```
+
+```{r}
+gbm.plot(logNPPwest_BRT)
+gbm.plot(logNPPcentral_BRT)
+gbm.plot(logNPPeast_BRT)
+
+# Get pdp values for each 
+logNPPwest_Depth.pdp <- partial(logNPPwest_BRT, pred.var = "Depth", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+logNPPwest_SST.pdp <- partial(logNPPwest_BRT, pred.var = "SSTweekly_1wkprior", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+logNPPwest_Upwelling.pdp <- partial(logNPPwest_BRT, pred.var = "Upwellingmonthly_1wkprior", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+logNPPwest_Windsum.pdp <- partial(logNPPwest_BRT, pred.var = "Windsum30d_1wkprior", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+logNPPwest_SSTanom.pdp <- partial(logNPPwest_BRT, pred.var = "SSTanommonthly_1wkprior", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+logNPPwest_DayofSeason.pdp <- partial(logNPPwest_BRT, pred.var = "DayofSeason", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+logNPPwest_Lat.pdp <- partial(logNPPwest_BRT, pred.var = "Lat", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+logNPPwest_Windspeed.pdp <- partial(logNPPwest_BRT, pred.var = "Windweekly_1wkprior", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+logNPPwest_DistToCoast.pdp <- partial(logNPPwest_BRT, pred.var = "DistToCoast", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+logNPPwest_Lon.pdp <- partial(logNPPwest_BRT, pred.var = "Lon", train = gridSTB.west.training, n.trees = logNPPwest_BRT$n.trees)
+
+logNPPcentral_Depth.pdp <- partial(logNPPcentral_BRT, pred.var = "Depth", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+logNPPcentral_SST.pdp <- partial(logNPPcentral_BRT, pred.var = "SSTweekly_2wkprior", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+logNPPcentral_Upwelling.pdp <- partial(logNPPcentral_BRT, pred.var = "Upwellingmonthly_2wkprior", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+logNPPcentral_Windsum.pdp <- partial(logNPPcentral_BRT, pred.var = "Windsum30d_2wkprior", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+logNPPcentral_SSTanom.pdp <- partial(logNPPcentral_BRT, pred.var = "SSTanommonthly_2wkprior", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+logNPPcentral_DayofSeason.pdp <- partial(logNPPcentral_BRT, pred.var = "DayofSeason", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+logNPPcentral_Lat.pdp <- partial(logNPPcentral_BRT, pred.var = "Lat", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+logNPPcentral_Windspeed.pdp <- partial(logNPPcentral_BRT, pred.var = "Windweekly_2wkprior", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+logNPPcentral_DistToCoast.pdp <- partial(logNPPcentral_BRT, pred.var = "DistToCoast", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+logNPPcentral_Lon.pdp <- partial(logNPPcentral_BRT, pred.var = "Lon", train = gridSTB.central.training, n.trees = logNPPcentral_BRT$n.trees)
+
+logNPPeast_Depth.pdp <- partial(logNPPeast_BRT, pred.var = "Depth", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+logNPPeast_SST.pdp <- partial(logNPPeast_BRT, pred.var = "SSTweekly_3wkprior", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+logNPPeast_Upwelling.pdp <- partial(logNPPeast_BRT, pred.var = "Upwellingmonthly_3wkprior", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+logNPPeast_Windsum.pdp <- partial(logNPPeast_BRT, pred.var = "Windsum30d_3wkprior", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+logNPPeast_SSTanom.pdp <- partial(logNPPeast_BRT, pred.var = "SSTanommonthly_3wkprior", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+logNPPeast_DayofSeason.pdp <- partial(logNPPeast_BRT, pred.var = "DayofSeason", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+logNPPeast_Lat.pdp <- partial(logNPPeast_BRT, pred.var = "Lat", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+logNPPeast_Windspeed.pdp <- partial(logNPPeast_BRT, pred.var = "Windweekly_3wkprior", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+logNPPeast_DistToCoast.pdp <- partial(logNPPeast_BRT, pred.var = "DistToCoast", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+logNPPeast_Lon.pdp <- partial(logNPPeast_BRT, pred.var = "Lon", train = gridSTB.east.training, n.trees = logNPPeast_BRT$n.trees)
+
+
+logNPP_SST.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_SST.pdp, aes(y=yhat, x=SSTweekly_1wkprior), color="dark green") +
+  geom_smooth(data = logNPPcentral_SST.pdp, aes(y=yhat, x=SSTweekly_2wkprior), color="blue") +
+  geom_smooth(data = logNPPeast_SST.pdp, aes(y=yhat, x=SSTweekly_3wkprior), color="purple") + 
+  
+  geom_rug(data = logNPPwest_SST.pdp, aes(y=yhat, x=SSTweekly_1wkprior), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_SST.pdp, aes(y=yhat, x=SSTweekly_2wkprior), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_SST.pdp, aes(y=yhat, x=SSTweekly_3wkprior), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("SST") + ylab("Fitted function") +
+  theme_classic()
+
+logNPP_Upwelling.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_1wkprior), color="dark green") +
+  geom_smooth(data = logNPPcentral_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_2wkprior), color="blue") +
+  geom_smooth(data = logNPPeast_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_3wkprior), color="purple") + 
+  
+  geom_rug(data = logNPPwest_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_1wkprior), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_2wkprior), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_Upwelling.pdp, aes(y=yhat, x=Upwellingmonthly_3wkprior), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("Upwelling index") + ylab("Fitted function") +
+  theme_classic()
+
+logNPP_SSTanom.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_1wkprior), color="dark green") +
+  geom_smooth(data = logNPPcentral_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_2wkprior), color="blue") +
+  geom_smooth(data = logNPPeast_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_3wkprior), color="purple") + 
+  
+  geom_rug(data = logNPPwest_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_1wkprior), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_2wkprior), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_SSTanom.pdp, aes(y=yhat, x=SSTanommonthly_3wkprior), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("SST anomaly") + ylab("Fitted function") +
+  theme_classic()
+
+logNPP_Windsum.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_Windsum.pdp, aes(y=yhat, x=Windsum30d_1wkprior), color="dark green") +
+  geom_smooth(data = logNPPcentral_Windsum.pdp, aes(y=yhat, x=Windsum30d_2wkprior), color="blue") +
+  geom_smooth(data = logNPPeast_Windsum.pdp, aes(y=yhat, x=Windsum30d_3wkprior), color="purple") + 
+  
+  geom_rug(data = logNPPwest_Windsum.pdp, aes(y=yhat, x=Windsum30d_1wkprior), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_Windsum.pdp, aes(y=yhat, x=Windsum30d_2wkprior), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_Windsum.pdp, aes(y=yhat, x=Windsum30d_3wkprior), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("Prior wind input") + ylab("Fitted function") +
+  theme_classic()
+
+logNPP_Windspeed.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_Windspeed.pdp, aes(y=yhat, x=Windweekly_1wkprior), color="dark green") +
+  geom_smooth(data = logNPPcentral_Windspeed.pdp, aes(y=yhat, x=Windweekly_2wkprior), color="blue") +
+  geom_smooth(data = logNPPeast_Windspeed.pdp, aes(y=yhat, x=Windweekly_3wkprior), color="purple") + 
+  
+  geom_rug(data = logNPPwest_Windspeed.pdp, aes(y=yhat, x=Windweekly_1wkprior), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_Windspeed.pdp, aes(y=yhat, x=Windweekly_2wkprior), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_Windspeed.pdp, aes(y=yhat, x=Windweekly_3wkprior), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("Mean wind speed (m/s)") + ylab("Fitted function") +
+  theme_classic()
+
+logNPP_Depth.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_Depth.pdp, aes(y=yhat, x=Depth), color="dark green") +
+  geom_smooth(data = logNPPcentral_Depth.pdp, aes(y=yhat, x=Depth), color="blue") +
+  geom_smooth(data = logNPPeast_Depth.pdp, aes(y=yhat, x=Depth), color="purple") + 
+  
+  geom_rug(data = logNPPwest_Depth.pdp, aes(y=yhat, x=Depth), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_Depth.pdp, aes(y=yhat, x=Depth), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_Depth.pdp, aes(y=yhat, x=Depth), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("Depth") + ylab("Fitted function") +
+  theme_classic()
+
+logNPP_DistToCoast.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="dark green") +
+  geom_smooth(data = logNPPcentral_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="blue") +
+  geom_smooth(data = logNPPeast_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="purple") + 
+  
+  geom_rug(data = logNPPwest_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_DistToCoast.pdp, aes(y=yhat, x=DistToCoast/1000), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("Distance to coast (km)") + ylab("Fitted function") +
+  theme_classic()
+
+logNPP_Lat.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_Lat.pdp, aes(y=yhat, x=Lat), color="dark green") +
+  geom_smooth(data = logNPPcentral_Lat.pdp, aes(y=yhat, x=Lat), color="blue") +
+  geom_smooth(data = logNPPeast_Lat.pdp, aes(y=yhat, x=Lat), color="purple") + 
+  
+  geom_rug(data = logNPPwest_Lat.pdp, aes(y=yhat, x=Lat), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_Lat.pdp, aes(y=yhat, x=Lat), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_Lat.pdp, aes(y=yhat, x=Lat), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("Latitude") + ylab("Fitted function") +
+  theme_classic()
+
+logNPP_Lon.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_Lon.pdp, aes(y=yhat, x=Lon), color="dark green") +
+  geom_smooth(data = logNPPcentral_Lon.pdp, aes(y=yhat, x=Lon), color="blue") +
+  geom_smooth(data = logNPPeast_Lon.pdp, aes(y=yhat, x=Lon), color="purple") + 
+  
+  geom_rug(data = logNPPwest_Lon.pdp, aes(y=yhat, x=Lon), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_Lon.pdp, aes(y=yhat, x=Lon), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_Lon.pdp, aes(y=yhat, x=Lon), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("Longitude") + ylab("Fitted function") +
+  theme_classic()
+
+logNPP_DayofSeason.pdp <- ggplot() +
+  geom_smooth(data = logNPPwest_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="dark green") +
+  geom_smooth(data = logNPPcentral_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="blue") +
+  geom_smooth(data = logNPPeast_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="purple") + 
+  
+  geom_rug(data = logNPPwest_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="dark green", sides="b") +
+  geom_rug(data = logNPPcentral_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="blue", sides="b") +
+  geom_rug(data = logNPPeast_DayofSeason.pdp, aes(y=yhat, x=DayofSeason), color="purple", sides="b") + 
+  
+  ylim(6.5,8) + xlab("Day of season") + ylab("Fitted function") +
+  theme_classic()
+
+logNPPforecast.pdp <- grid.arrange(logNPP_SST.pdp, logNPP_Upwelling.pdp, logNPP_SSTanom.pdp, logNPP_Windsum.pdp, logNPP_Windspeed.pdp,
+                                   logNPP_Depth.pdp, logNPP_DistToCoast.pdp, logNPP_Lat.pdp, logNPP_Lon.pdp, logNPP_DayofSeason.pdp, ncol=3, nrow=4)
+
+ggsave(logNPPforecast.pdp, file="./forecast models manuscript/plots/logNPPforecast.pdp.png",
+         width = 180, height = 160, units = "mm")
+
+ggInfluence(logNPPwest_BRT)
+ggInfluence(logNPPcentral_BRT)
+ggInfluence(logNPPeast_BRT)
+
+```
+
+
+
+
+# Fig. S4:
+```{r}
+
+PApreds.hist <- ggplot() +
+  geom_density(data = predvalues.background.df, aes(x=pred, fill="Background"), alpha=0.5) +
+  geom_density(data = predvalues.sightings.df, aes(x=pred, fill="Sightings"), alpha=0.5) +
+  scale_fill_manual(name = "",
+    breaks=c("Background", "Sightings"),
+    values = c("dark blue", "dark green")) +
+  scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+  ylab("Probability density") + xlab("Predicted probability of presence") +
+  theme_classic() +
+  theme(legend.position=c(.3, .9))
+
+PApreds.hist
+
+ggsave(PApreds.hist, file="./forecast models manuscript/plots/PAdiscrimination.png",
+         width = 80, height=80, units = "mm")
+
+```
+

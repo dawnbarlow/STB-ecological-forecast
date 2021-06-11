@@ -1,0 +1,345 @@
+---
+title: "Forecast models"
+author: "Dawn Barlow"
+date: "6/11/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(raster)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(maps)
+library(sf)
+library(rgdal)
+library(rgeos)
+library(rerddapXtracto)
+library(dismo)
+library(gbm)
+library(zoo)
+library(RColorBrewer)
+
+gridSTB.pointlocs.df <- read.csv("gridSTB.pointlocations.df.csv")
+
+NZcoastlines <- readOGR("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/nz-coastlines-and-islands-polygons-topo-150k.shp")
+
+bathy.r <- raster("NIWA_depth_rast_.5x.5.tif")
+Lon.r <- raster("Lon_raster.tif")
+Lat.r <- raster("Lat_raster.tif")
+
+gridSTB.west.df <- read.csv("gridSTB.west.df_RSdata_Jan2021.csv")
+gridSTB.central.df <- read.csv("gridSTB.central.df_RSdata_Jan2021.csv")
+gridSTB.east.df <- read.csv("gridSTB.east.df_RSdata_Jan2021.csv")
+
+```
+
+# Extract static features 
+```{r}
+## Extract depth at each point location
+bathy.r
+
+# resample at 1 km resolution
+bathy.r <- aggregate(bathy.r,fact = 2)
+
+# set projection to geographic (WGS84)
+bathy.r <- projectRaster(bathy.r, crs = ('+proj=longlat +datum=WGS84'))
+#plot(bathy.r)
+
+# crop to just STB
+e.STB <- extent(170, 175.2, -42.05, -39.3)
+bathy_STB.r <- crop(bathy.r, e.STB)
+
+# extract values at point locations
+gridSTB.pointlocs.df$Depth <- extract(bathy_STB.r, gridSTB.pointlocs.df[1:2])
+
+
+## Measure distance to shore
+NZcoastlines
+
+NZcoastlines_STB <- crop(NZcoastlines, e.STB)
+plot(NZcoastlines_STB)
+
+# create raster based on bathy raster
+DistToCoast.r <- bathy_STB.r
+DistToCoast.r[DistToCoast.r<0] <- NA # remove land cells 
+
+bathy_STB.sp <- as(bathy_STB.r, "SpatialPoints") # convert grid cell locations to points
+
+# measure distance between points (raster cell locations) and coastline (needs to be projected!)
+
+bathy_STB.sp <- spTransform(bathy_STB.sp, '+proj=tmerc +lat_0=0 +lon_0=173 +k=0.9996 +x_0=1600000 
+           +y_0=10000000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs')
+
+NZcoastlines_STB <- spTransform(NZcoastlines_STB, "+proj=tmerc +lat_0=0 +lon_0=173 +k=0.9996 +x_0=1600000
+                                       +y_0=10000000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs")
+
+dists <- gDistance(bathy_STB.sp, NZcoastlines_STB, byid=TRUE) # distance calcs from rgeos
+dmin <- apply(dists,2,min) # finds minimum point-to-line distance
+
+DistToCoast.r[] <- dmin # adds distance to coast value to raster cells
+
+plot(DistToCoast.r) # sweet!
+
+# now project back to geographic
+DistToCoast.r <- projectRaster(DistToCoast.r, crs = ('+proj=longlat +datum=WGS84'))
+NZcoastlines_STB <- spTransform(NZcoastlines_STB, '+proj=longlat +datum=WGS84')
+
+plot(DistToCoast.r)
+plot(NZcoastlines_STB, add=TRUE) # YAY! 
+
+# extract values at point locations
+gridSTB.pointlocs.df$DistToCoast <- extract(DistToCoast.r, gridSTB.pointlocs.df[1:2])
+
+
+## Save rasters created, while we're at it... 
+writeRaster(bathy_STB.r, "STBbathy_1km.tif")
+writeRaster(DistToCoast.r, "DistToCoast_1km.tif")
+
+```
+
+```{r}
+
+## Partition into training and test datasets
+Dates.all <- unique(gridSTB.west.df$Date)
+length(Dates.all)
+0.2*1822 # randomly sample 364 dates for test dataset
+set.seed(123)
+Dates.test <- sample(Dates.all, size=364, replace=F)
+Dates.training <- Dates.all[! Dates.all %in% Dates.test]
+
+gridSTB.west.training <- filter(gridSTB.west.df, Date %in% Dates.training)
+gridSTB.west.test <- filter(gridSTB.west.df, Date %in% Dates.test)
+
+gridSTB.central.training <- filter(gridSTB.central.df, Date %in% Dates.training)
+gridSTB.central.test <- filter(gridSTB.central.df, Date %in% Dates.test)
+
+gridSTB.east.training <- filter(gridSTB.east.df, Date %in% Dates.training)
+gridSTB.east.test <- filter(gridSTB.east.df, Date %in% Dates.test)
+
+colnames(gridSTB.west.training)
+
+```
+
+# MODELS! 
+
+# SST
+```{r}
+# WEST
+SSTwest_BRT <- gbm.step(gridSTB.west.training[!is.na(gridSTB.west.training$SST_current),],
+                    gbm.x = c(3,4,27,54,62,63,70,71,72),
+                    gbm.y = 10,
+                    family = "gaussian",
+                    bag.fraction = 0.5,
+                    learning.rate = 0.1,
+                    tree.complexity = 3)
+
+# look at model summaries
+summary(SSTwest_BRT)
+gbm.plot(SSTwest_BRT)
+
+cvcor.west <- SSTwest_BRT$cv.statistics$correlation.mean
+cvcor.west
+nulldev <-  SSTwest_BRT$self.statistics$mean.null
+fitdev <-  SSTwest_BRT$cv.statistics$deviance.mean
+cvdev.west <- (nulldev - fitdev)/nulldev
+cvdev.west
+
+# Predict to test data
+SSTwest_BRT.pred <- predict.gbm(SSTwest_BRT, gridSTB.west.test, n.trees = SSTwest_BRT$gbm.call$best.trees, type="response")
+
+nulldev.pred <-  calc.deviance(obs=gridSTB.west.test$SST_current,rep(mean(gridSTB.west.test$SST_current),nrow(gridSTB.west.test)), 
+                               family = "gaussian",calc.mean=TRUE) 
+fitdev.pred <-  calc.deviance(obs=gridSTB.west.test$SST_current, pred=SSTwest_BRT.pred, family = "gaussian", calc.mean=TRUE)
+preddev.west <- (nulldev.pred - fitdev.pred)/nulldev.pred
+preddev.west
+
+saveRDS(SSTwest_BRT, "SSTwest_BRT.rds")
+
+```
+
+```{r}
+# CENTRAL
+SSTcentral_BRT <- gbm.step(gridSTB.central.training[!is.na(gridSTB.central.training$SST_current),], 
+                    gbm.x = c(3,4,36,57,65,66,70,71,72),
+                    gbm.y = 10,
+                    family = "gaussian",
+                    bag.fraction = 0.5,
+                    learning.rate = 0.1,
+                    tree.complexity = 3)
+
+# look at model summaries
+summary(SSTcentral_BRT)
+gbm.plot(SSTcentral_BRT)
+
+cvcor.central <- SSTcentral_BRT$cv.statistics$correlation.mean
+cvcor.central
+nulldev <-  SSTcentral_BRT$self.statistics$mean.null
+fitdev <-  SSTcentral_BRT$cv.statistics$deviance.mean
+cvdev.central <- (nulldev - fitdev)/nulldev
+cvdev.central
+
+# Predict to test data
+SSTcentral_BRT.pred <- predict.gbm(SSTcentral_BRT, gridSTB.central.test[!is.na(gridSTB.central.test$SST_current),], n.trees = SSTcentral_BRT$gbm.call$best.trees, type="response")
+
+nulldev.pred <-  calc.deviance(obs=gridSTB.central.test$SST_current[!is.na(gridSTB.central.test$SST_current)],rep(mean(gridSTB.central.test$SST_current[!is.na(gridSTB.central.test$SST_current)]),nrow(gridSTB.central.test[!is.na(gridSTB.central.test$SST_current),])), family = "gaussian",calc.mean=TRUE) 
+fitdev.pred <-  calc.deviance(obs=gridSTB.central.test$SST_current[!is.na(gridSTB.central.test$SST_current)], pred=SSTcentral_BRT.pred, family = "gaussian", calc.mean=TRUE)
+preddev.central <- (nulldev.pred - fitdev.pred)/nulldev.pred
+preddev.central
+
+saveRDS(SSTcentral_BRT, "SSTcentral_BRT.rds")
+
+```
+
+```{r}
+# EAST
+SSTeast_BRT <- gbm.step(gridSTB.east.training[!is.na(gridSTB.east.training$SST_current),], 
+                    gbm.x = c(3,4,45,60,68,69,70,71,72),
+                    gbm.y = 10,
+                    family = "gaussian",
+                    bag.fraction = 0.5,
+                    learning.rate = 0.1,
+                    tree.complexity = 3)
+
+# look at model summaries
+summary(SSTeast_BRT)
+gbm.plot(SSTeast_BRT)
+
+cvcor.east <- SSTeast_BRT$cv.statistics$correlation.mean
+cvcor.east
+nulldev <-  SSTeast_BRT$self.statistics$mean.null
+fitdev <-  SSTeast_BRT$cv.statistics$deviance.mean
+cvdev.east <- (nulldev - fitdev)/nulldev
+cvdev.east
+
+# Predict to test data
+SSTeast_BRT.pred <- predict.gbm(SSTeast_BRT, gridSTB.east.test, n.trees = SSTeast_BRT$gbm.call$best.trees, type="response")
+
+nulldev.pred <-  calc.deviance(obs=gridSTB.east.test$SST_current,rep(mean(gridSTB.east.test$SST_current),nrow(gridSTB.east.test)), 
+                               family = "gaussian",calc.mean=TRUE) 
+fitdev.pred <-  calc.deviance(obs=gridSTB.east.test$SST_current, pred=SSTeast_BRT.pred, family = "gaussian", calc.mean=TRUE)
+preddev.east <- (nulldev.pred - fitdev.pred)/nulldev.pred
+preddev.east
+
+saveRDS(SSTeast_BRT, "SSTeast_BRT.rds")
+
+```
+
+```{r}
+SSTwest_BRT$gbm.call$best.trees
+SSTcentral_BRT$gbm.call$best.trees
+SSTeast_BRT$gbm.call$best.trees
+
+```
+
+
+#logNPP
+Started running around 5:30ish 12Jan2021
+```{r}
+# WEST
+logNPPwest_BRT <- gbm.step(gridSTB.west.training[!is.na(gridSTB.west.training$logNPP_current),], 
+                    gbm.x = c(3,4,27,23,54,62,63,70,71,72),
+                    gbm.y = 13,
+                    family = "gaussian",
+                    bag.fraction = 0.5,
+                    learning.rate = 0.5,
+                    tree.complexity = 3)
+
+# look at model summaries
+summary(logNPPwest_BRT)
+gbm.plot(logNPPwest_BRT)
+
+cvcor.west <- logNPPwest_BRT$cv.statistics$correlation.mean
+cvcor.west
+nulldev <-  logNPPwest_BRT$self.statistics$mean.null
+fitdev <-  logNPPwest_BRT$cv.statistics$deviance.mean
+cvdev.west <- (nulldev - fitdev)/nulldev
+cvdev.west
+
+
+# Predict to test data
+logNPPwest_BRT.pred <- predict.gbm(logNPPwest_BRT, gridSTB.west.test[!is.na(gridSTB.west.test$logNPP_current),], n.trees = logNPPwest_BRT$gbm.call$best.trees, type="response")
+
+nulldev.pred <-  calc.deviance(obs=gridSTB.west.test$logNPP_current[!is.na(gridSTB.west.test$logNPP_current)],rep(mean(gridSTB.west.test$logNPP_current[!is.na(gridSTB.west.test$logNPP_current)]),nrow(gridSTB.west.test[!is.na(gridSTB.west.test$logNPP_current),])), family = "gaussian",calc.mean=TRUE) 
+fitdev.pred <-  calc.deviance(obs=gridSTB.west.test$logNPP_current[!is.na(gridSTB.west.test$logNPP_current)], pred=logNPPwest_BRT.pred, family = "gaussian", calc.mean=TRUE)
+preddev.west <- (nulldev.pred - fitdev.pred)/nulldev.pred
+preddev.west
+
+saveRDS(logNPPwest_BRT, "logNPPwest_BRT.rds")
+
+```
+
+```{r}
+# CENTRAL
+logNPPcentral_BRT <- gbm.step(gridSTB.central.training[!is.na(gridSTB.central.training$logNPP_current),], 
+                    gbm.x = c(3,4,36,32,57,65,66,70,71,72),
+                    gbm.y = 13,
+                    family = "gaussian",
+                    bag.fraction = 0.5,
+                    learning.rate = 0.5,
+                    tree.complexity = 3)
+
+# look at model summaries
+summary(logNPPcentral_BRT)
+gbm.plot(logNPPcentral_BRT)
+
+cvcor.central <- logNPPcentral_BRT$cv.statistics$correlation.mean
+cvcor.central
+nulldev <-  logNPPcentral_BRT$self.statistics$mean.null
+fitdev <-  logNPPcentral_BRT$cv.statistics$deviance.mean
+cvdev.central <- (nulldev - fitdev)/nulldev
+cvdev.central
+
+# Predict to test data
+logNPPcentral_BRT.pred <- predict.gbm(logNPPcentral_BRT, gridSTB.central.test[!is.na(gridSTB.central.test$logNPP_current),], n.trees = logNPPcentral_BRT$gbm.call$best.trees, type="response")
+
+nulldev.pred <-  calc.deviance(obs=gridSTB.central.test$logNPP_current[!is.na(gridSTB.central.test$logNPP_current)],rep(mean(gridSTB.central.test$logNPP_current[!is.na(gridSTB.central.test$logNPP_current)]),nrow(gridSTB.central.test[!is.na(gridSTB.central.test$logNPP_current),])), family = "gaussian",calc.mean=TRUE) 
+fitdev.pred <-  calc.deviance(obs=gridSTB.central.test$logNPP_current[!is.na(gridSTB.central.test$logNPP_current)], pred=logNPPcentral_BRT.pred, family = "gaussian", calc.mean=TRUE)
+preddev.central <- (nulldev.pred - fitdev.pred)/nulldev.pred
+preddev.central
+
+saveRDS(logNPPcentral_BRT, "logNPPcentral_BRT.rds")
+
+```
+
+```{r}
+# EAST
+logNPPeast_BRT <- gbm.step(gridSTB.east.training[!is.na(gridSTB.east.training$logNPP_current),], 
+                    gbm.x = c(3,4,45,41,60,68,69,70,71,72),
+                    gbm.y = 13,
+                    family = "gaussian",
+                    bag.fraction = 0.5,
+                    learning.rate = 0.5,
+                    tree.complexity = 3)
+
+# look at model summaries
+summary(logNPPeast_BRT)
+gbm.plot(logNPPeast_BRT)
+
+cvcor.east <- logNPPeast_BRT$cv.statistics$correlation.mean
+cvcor.east
+nulldev <-  logNPPeast_BRT$self.statistics$mean.null
+fitdev <-  logNPPeast_BRT$cv.statistics$deviance.mean
+cvdev.east <- (nulldev - fitdev)/nulldev
+cvdev.east
+
+# Predict to test data
+logNPPeast_BRT.pred <- predict.gbm(logNPPeast_BRT, gridSTB.east.test[!is.na(gridSTB.east.test$logNPP_current),], n.trees = logNPPeast_BRT$gbm.call$best.trees, type="response")
+
+nulldev.pred <-  calc.deviance(obs=gridSTB.east.test$logNPP_current[!is.na(gridSTB.east.test$logNPP_current)],rep(mean(gridSTB.east.test$logNPP_current[!is.na(gridSTB.east.test$logNPP_current)]),nrow(gridSTB.east.test[!is.na(gridSTB.east.test$logNPP_current),])), family = "gaussian",calc.mean=TRUE) 
+fitdev.pred <-  calc.deviance(obs=gridSTB.east.test$logNPP_current[!is.na(gridSTB.east.test$logNPP_current)], pred=logNPPeast_BRT.pred, family = "gaussian", calc.mean=TRUE)
+preddev.east <- (nulldev.pred - fitdev.pred)/nulldev.pred
+preddev.east
+
+saveRDS(logNPPeast_BRT, "logNPPeast_BRT.rds")
+
+```
+
+```{r}
+logNPPwest_BRT$gbm.call$best.trees
+logNPPcentral_BRT$gbm.call$best.trees
+logNPPeast_BRT$gbm.call$best.trees
+
+```
+

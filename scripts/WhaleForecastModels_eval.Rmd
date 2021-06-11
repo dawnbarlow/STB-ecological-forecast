@@ -1,0 +1,333 @@
+---
+title: 'Whale forecast model: evaluation'
+author: "Dawn Barlow"
+date: "6/11/2021"
+output: html_document
+---
+```{r}
+
+library(dplyr)
+library(raster)
+library(ggplot2)
+library(gridExtra)
+library(maps)
+library(sf)
+library(rgdal)
+library(rgeos)
+library(dismo)
+library(gbm)
+library(ggBRT)
+library(zoo)
+library(viridis)
+library(purrr)
+library(magick)
+library(ROCR)
+
+# PA data data (all sightings and background points)
+PA_AllSightings.df <- read.csv("SightingsBackgroundPoints.RSdata.forecast_Jan2021.csv")
+PA_AllSightings.df$X <- NULL
+
+PA_AllSightings.df$Date <- as.Date(PA_AllSightings.df$Date)
+
+# Full model:
+whales.allsightings_BRT <- readRDS("whales.allsightings_BRT2.rds")
+
+# Model performance outputs from bootstrap runs:
+cvAUC.list <- readRDS("cvAUC.list.rds")
+predAUC.list <- readRDS("predAUC.list.rds")
+cvDevExp.list <- readRDS("cvDevExp.list.rds")
+ntrees.list <- readRDS("ntrees.list.rds")
+
+predlayers.list <- readRDS("predlayers.list.rds")
+predvalues.background.list <- readRDS("predvalues.background.list.rds")
+predvalues.sightings.list <- readRDS("predvalues.sightings.list.rds")
+
+```
+
+# Quick visual of sightings data in each year, and background area sampled:
+```{r}
+
+# make study area polygon using sf
+Lon <- c(171.5,170.55,171.85,174.7, 175.5, 174.7,174.3,172.77,171.5) # need to "close" the polygon
+Lat <- c(-42.05,-42.05,-38.6,-38.6, -40.5 ,-41.2,-41.2,-40.55,-42.05)
+
+StudyArea <- as.data.frame(cbind(Lon,Lat)) 
+
+StudyArea.polygon_wgs <- StudyArea %>%
+  st_as_sf(coords = c("Lon", "Lat"),crs = "+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs") %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  st_cast("POLYGON")
+
+#plot(StudyArea.polygon_wgs, axes=TRUE)
+
+# plot sightings by year
+NZ <- map_data("nz") 
+ggplot() +
+  geom_point(data = PA_AllSightings.df[PA_AllSightings.df$presence==1,], aes(x=Longitude, y=Latitude), shape=24, fill="royal blue") +
+  geom_sf(data = StudyArea.polygon_wgs, fill = "transparent") +
+  geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="dark gray") +
+  coord_sf(xlim=c(170,175.2), ylim=c(-42.05,-38.5)) +
+  facet_wrap(~SummerYear, nrow=2) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+
+length(PA_AllSightings.df$presence[PA_AllSightings.df$presence==1])
+sum(PA_AllSightings.df$Group.Size)
+length(PA_AllSightings.df$presence[PA_AllSightings.df$presence==0])
+
+```
+
+# MODEL
+```{r}
+
+ggPerformance(whales.allsightings_BRT)
+
+ggPD(whales.allsightings_BRT, rug = TRUE, smooth = TRUE, col.line = "light blue", col.smooth = "royal blue", cex.smooth = 1) 
+
+```
+
+
+# Model evaluation from bootstrap runs
+```{r}
+
+# Model performance summaries
+mean(unlist(cvAUC.list))
+sd(unlist(cvAUC.list))
+
+mean(unlist(cvDevExp.list))
+sd(unlist(cvDevExp.list))
+
+mean(unlist(predAUC.list))
+sd(unlist(predAUC.list))
+
+median(unlist(ntrees.list))
+range(unlist(ntrees.list))
+
+# Predicted values at sighting/background locations
+mean(Reduce(c,predvalues.sightings.list), na.rm=TRUE)
+sd(Reduce(c,predvalues.sightings.list), na.rm=TRUE)
+
+mean(Reduce(c,predvalues.background.list), na.rm=TRUE)
+sd(Reduce(c,predvalues.background.list), na.rm=TRUE)
+
+# get all values from sighting/background locs in dfs
+predvalues.sightings.df <- as.data.frame(Reduce(c,predvalues.sightings.list))
+colnames(predvalues.sightings.df) <- "pred"
+
+predvalues.background.df <- as.data.frame(Reduce(c,predvalues.background.list))
+colnames(predvalues.background.df) <- "pred"
+
+
+thresholds <- seq(0,1,0.01)
+
+# Available habitat at range of discrimination thresholds
+avh <- c()
+
+for (i in 1:length(thresholds)) {
+  
+  avh_i <- length(predvalues.background.df$pred[predvalues.background.df$pred > thresholds[i]])/length(predvalues.background.df$pred)
+  avh[i] <- avh_i
+  
+}
+
+avh_thresh.df <- as.data.frame(cbind(thresholds, avh))
+
+ggplot(data = avh_thresh.df, aes(y=avh, x=thresholds)) +
+  geom_line(size=2) +
+  xlab("Threshold") + ylab("Available habitat") + theme_bw()
+
+
+# True positive rate at range of discrimination thresholds
+tpr <- c()
+
+for (i in 1:length(thresholds)) {
+  
+  tpr_i <- length(predvalues.sightings.df$pred[predvalues.sightings.df$pred > thresholds[i]])/length(predvalues.sightings.df$pred)
+  tpr[i] <- tpr_i
+  
+}
+
+tpr_thresh.df <- as.data.frame(cbind(thresholds, tpr))
+
+ggplot(data = tpr_thresh.df, aes(y=tpr, x=thresholds)) +
+  geom_line(size=2) +
+  xlab("Threshold") + ylab("true positive rate") + theme_bw()
+
+# false negative rate at range of discrimination thresholds
+fnr <- c()
+
+for (i in 1:length(thresholds)) {
+  
+  fnr_i <- length(predvalues.sightings.df$pred[predvalues.sightings.df$pred < thresholds[i]])/length(predvalues.sightings.df$pred)
+  fnr[i] <- fnr_i
+  
+}
+
+fnr_thresh.df <- as.data.frame(cbind(thresholds, fnr))
+
+ggplot(data = fnr_thresh.df, aes(y=fnr, x=thresholds)) +
+  geom_line(size=2) +
+  xlab("Threshold") + ylab("false negative rate") + theme_bw()
+
+# Summarize true positives/false negatives at different discrimination thresholds
+tp.fn <- c()
+
+for (i in 1:length(thresholds)) {
+  
+  tp.fn_i <- length(predvalues.sightings.df$pred[predvalues.sightings.df$pred > thresholds[i]]) /
+    length(predvalues.sightings.df$pred[predvalues.sightings.df$pred < thresholds[i]])
+  tp.fn[i] <- tp.fn_i
+  
+}
+
+tp.fn_thresh.df <- as.data.frame(cbind(thresholds, tp.fn))
+
+ggplot(data = tp.fn_thresh.df, aes(y=tp.fn, x=thresholds)) +
+  geom_line(size=2) +
+  xlab("Threshold") + ylab("true positives/false negatives") + theme_bw()
+
+
+# At treshold = 0.5: 
+# availability of habitat
+length(predvalues.background.df$pred[predvalues.background.df$pred>0.5])/length(predvalues.background.df$pred) 
+# true positive rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred>0.5])/length(predvalues.sightings.df$pred) 
+# false negative rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred<0.5])/length(predvalues.sightings.df$pred) 
+
+# At treshold = 0.6: 
+# availability of habitat
+length(predvalues.background.df$pred[predvalues.background.df$pred>0.6])/length(predvalues.background.df$pred) 
+# true positive rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred>0.6])/length(predvalues.sightings.df$pred) 
+# false negative rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred<0.6])/length(predvalues.sightings.df$pred) 
+
+# At treshold = 0.55: 
+# availability of habitat
+length(predvalues.background.df$pred[predvalues.background.df$pred>0.55])/length(predvalues.background.df$pred) 
+# true positive rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred>0.55])/length(predvalues.sightings.df$pred) 
+# false negative rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred<0.55])/length(predvalues.sightings.df$pred) 
+
+# At treshold = 0.45: 
+# availability of habitat
+length(predvalues.background.df$pred[predvalues.background.df$pred>0.45])/length(predvalues.background.df$pred) 
+# true positive rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred>0.45])/length(predvalues.sightings.df$pred) 
+# false negative rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred<0.45])/length(predvalues.sightings.df$pred) 
+
+# At treshold = 0.4: 
+# availability of habitat
+length(predvalues.background.df$pred[predvalues.background.df$pred>0.4])/length(predvalues.background.df$pred) 
+# true positive rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred>0.4])/length(predvalues.sightings.df$pred) 
+# false negative rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred<0.4])/length(predvalues.sightings.df$pred) 
+
+```
+
+Because of LOW PREVALENCE, err on the side of MINIMIZING false negatives
+
+```{r}
+
+perf.at.thresh.df <- merge(avh_thresh.df, tpr_thresh.df, by = "thresholds")
+perf.at.thresh.df <- merge(perf.at.thresh.df, fnr_thresh.df, by = "thresholds")
+
+
+ggplot() +
+  geom_line(data = avh_thresh.df, aes(y=avh, x=thresholds), size=2) +
+  geom_line(data = tpr_thresh.df, aes(y=tpr, x=thresholds), size=2, color="blue")  +
+  geom_line(data = fnr_thresh.df, aes(y=fnr, x=thresholds), size=2, color="green") + 
+  geom_hline(yintercept = 0.3, linetype = "dashed") +
+  geom_vline(xintercept = 0.4, linetype = "dashed") +
+  xlab("Threshold") + ylab("") + theme_bw()
+
+# At treshold = 0.4: 
+# availability of habitat
+length(predvalues.background.df$pred[predvalues.background.df$pred>0.4])/length(predvalues.background.df$pred) 
+# true positive rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred>0.4])/length(predvalues.sightings.df$pred) 
+# false negative rate
+length(predvalues.sightings.df$pred[predvalues.sightings.df$pred<0.4])/length(predvalues.sightings.df$pred) 
+
+```
+
+
+```{r}
+
+length(predlayers.list)
+
+predhabitat.plots <- list()
+
+for (i in 1:26) {
+  
+  # get polygons of 0.4 contour
+  predpoly_i.sp <- rasterToPolygons(clump(predlayers.list[[i]] > 0.4), dissolve = TRUE)
+  
+  # calculate area of each polygon (does not need to be projected)
+  predpoly_i.sp$area_sqkm <- area(predpoly_i.sp)/1000000
+
+  # remove polygons where area is < 100 square km, i.e. areas smaller than 10km x 10km
+  predpoly_i.sp.sub <- subset(predpoly_i.sp, area_sqkm > 100)
+
+  predpoly_i.sf <- st_as_sf(predpoly_i.sp.sub)
+  
+  predlayer_i.df <- as.data.frame(as(predlayers.list[[i]], "SpatialPixelsDataFrame"))
+
+
+  predhabitat.plot_i <- ggplot() +
+    geom_tile(data = predlayer_i.df, aes(x=x, y=y, fill=layer)) +
+    scale_fill_viridis(option = "inferno") +
+    geom_sf(data=predpoly_i.sf, color="white", fill="transparent") +
+    geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="dark gray") +
+    coord_sf(xlim=c(170.4,175.2), ylim=c(-42.05,-39.25)) +
+    xlab("Longitude") + ylab("Latitude") + labs(fill = "Probability\nof presence") +
+    ggtitle(paste(names(predlayers.list[i])))
+
+    
+  predhabitat.plots[[i]] <- predhabitat.plot_i
+  
+}
+
+predhabitat.plots
+
+```
+
+
+```{r}
+
+# calculate mean and sd of predicted habitat suitability across all runs, number of occurrences of pred>0.4 for each cell
+predhabitat.mean <- mean(stack(predlayers.list))
+plot(predhabitat.mean)
+
+predhabitat.sd <- calc(stack(predlayers.list), fun=function(x){sd(x)})
+plot(predhabitat.sd)
+
+
+# ggplot
+predhabitat.mean.df <- as.data.frame(as(predhabitat.mean, "SpatialPixelsDataFrame"))
+predhabitat.sd.df <- as.data.frame(as(predhabitat.sd, "SpatialPixelsDataFrame"))
+
+predhabitat.mean.plot <- ggplot() +
+  geom_tile(data = predhabitat.mean.df, aes(x=x, y=y, fill=layer)) +
+  scale_fill_distiller(palette="Spectral") +
+  geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="dark gray") +
+  coord_sf(xlim=c(170.4,175.2), ylim=c(-42.05,-39.25)) +
+  xlab("Longitude") + ylab("Latitude") + labs(fill = "Mean\nprobability\nof presence")
+
+predhabitat.sd.plot <- ggplot() +
+  geom_tile(data = predhabitat.sd.df, aes(x=x, y=y, fill=layer)) +
+  scale_fill_distiller(palette="Spectral") +
+  geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="dark gray") +
+  coord_sf(xlim=c(170.4,175.2), ylim=c(-42.05,-39.25)) +
+  xlab("Longitude") + ylab("Latitude") + labs(fill = "SD\nprobability\nof presence")
+
+
+predhabitat.mean.plot
+predhabitat.sd.plot
+
+
+```
+

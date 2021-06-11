@@ -1,0 +1,664 @@
+---
+title: "Forecast model spatial predictions for days with opportunistic whale data"
+author: "Dawn Barlow"
+date: "6/11/2021"
+output: html_document
+---
+
+```{r}
+
+library(dplyr)
+library(dismo)
+library(gbm)
+library(rerddapXtracto)
+library(maps)
+library(ggplot2)
+library(viridis)
+library(gridExtra)
+library(cowplot)
+
+# Read in models 
+SSTwest_BRT <- readRDS("SSTwest_BRT.rds")
+SSTcentral_BRT <- readRDS("SSTcentral_BRT.rds")
+SSTeast_BRT <- readRDS("SSTeast_BRT.rds")
+
+logNPPwest_BRT <- readRDS("logNPPwest_BRT.rds")
+logNPPcentral_BRT <- readRDS("logNPPcentral_BRT.rds")
+logNPPeast_BRT <- readRDS("logNPPeast_BRT.rds")
+
+# Read in static raster layers
+Lon.r <- raster("Lon_raster.tif")
+Lat.r <- raster("Lat_raster.tif")
+bathy_STB.r <- raster("STBbathy_1km.tif")
+DistToCoast.r <- raster("DistToCoast_1km.tif")
+
+
+# Read in dataframes with grid points, then split into regimes and training/test datasets
+gridSTB.west.df <- read.csv("gridSTB.west.df_RSdata_Jan2021.csv")
+gridSTB.central.df <- read.csv("gridSTB.central.df_RSdata_Jan2021.csv")
+gridSTB.east.df <- read.csv("gridSTB.east.df_RSdata_Jan2021.csv")
+
+gridSTB.west.df$X <- NULL
+gridSTB.central.df$X <- NULL
+gridSTB.east.df$X <- NULL
+
+# Read in dataframe with all blue whale sightings data
+ValData.df <- read.csv("STB_BW_sightings_compiled_CGJul2019+HHMay2020_DBAug2020.csv")
+ValData.df <- ValData.df[1:9] # get rid of random empty columns
+ValData.df$Date <- as.Date(paste(ValData.df$Day,ValData.df$Month,ValData.df$Year, sep = "/"), format = "%d/%m/%Y")
+
+# remove data from GEMM Lab surveys
+unique(ValData.df$Dataset)
+ValData.df <- ValData.df[ValData.df$Dataset!="GEMM STB 2014 field season" & ValData.df$Dataset!="GEMM STB 2016 field season" & ValData.df$Dataset!="GEMM STB 2017 field season",]
+
+# remove data from months outside of austral summer
+ValData_reduced.df <- ValData.df[ValData.df$Month<4 | ValData.df$Month>10,]
+
+ValDates <- as.Date(unique(ValData_reduced.df$Date))
+length(ValDates)
+
+```
+
+```{r}
+
+e.STB <- extent(170, 175.2, -42.05, -39.3)
+e.west <- extent(170, 172.8, -42.05, -39.3)
+e.central <- extent(172.6, 174.3, -42.05, -39.3)
+e.east <- extent(174.1, 175.2, -42.05, -39.3)
+
+NZ <- map_data("nz") # get outline of New Zealand from maps package
+
+# set up for xtracto
+dataInfo_SST1d <- rerddap::info('jplMURSST41')
+parameter_SST1d <- 'analysed_sst'
+
+dataInfo_SSTanom1d <- rerddap::info('jplMURSST41anom1day')
+parameter_SSTanom1d <-'sstAnom'
+
+dataInfo_NPP8d <- rerddap::info('erdMH1pp8day')
+parameter_NPP8d <- 'productivity'
+
+xcoord <- c(170, 175.2, 175.2, 170, 170)
+ycoord <- c(-39.3, -39.3, -42.05, -42.05, -39.3)
+
+```
+
+
+
+```{r}
+#ValDates <- as.Date(c("2014-01-25")) # test
+SST_t.rasters <- list()
+SST_pred.rasters <- list()
+SST_diff.rasters <- list()
+
+for (j in 12:length(ValDates)) {
+  
+  date_t <- ValDates[j] # Date to predict to
+  date_1wkprior <- date_t-7
+  date_2wkprior <- date_t-14
+  date_3wkprior <- date_t-21
+  
+  dates_t.weekly <- seq(as.Date(date_t-6), as.Date(date_t), by="days")
+  dates_1wkprior.weekly <- dates_t.weekly-7
+  dates_2wkprior.weekly <- dates_t.weekly-14
+  dates_3wkprior.weekly <- dates_t.weekly-21
+  
+  dates_t.monthly <- seq(as.Date(date_t-29), as.Date(date_t), by="days")
+  dates_1wkprior.monthly <- dates_t.monthly-7
+  dates_2wkprior.monthly <- dates_t.monthly-14
+  dates_3wkprior.monthly <- dates_t.monthly-21
+  
+  # SST (what we're trying to predict)
+  SST_t <- rxtractogon(dataInfo_SST1d, parameter=parameter_SST1d, tcoord = date_t, xcoord = xcoord, ycoord = ycoord)
+  SST_t.mat <- matrix(SST_t$analysed_sst,nrow=length(unique(SST_t$longitude)),
+                      ncol=length(unique(SST_t$latitude)))[,order(unique(SST_t$latitude))]
+  SST_t.r <- raster(apply(SST_t.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+  extent(SST_t.r) <- e.STB
+  proj4string(SST_t.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  # SST anomaly (monthly)
+  ## 1 week prior (west)
+  SSTanom.daily_1wkprior <- list()
+  for(i in 1:length(dates_t.monthly)){
+    SSTanom.daily <- rxtractogon(dataInfo_SSTanom1d, parameter=parameter_SSTanom1d, tcoord = dates_1wkprior.monthly[i], 
+                                 xcoord = xcoord, ycoord = ycoord)
+    SSTanom.daily.mat <- matrix(SSTanom.daily$sstAnom,nrow=length(unique(SSTanom.daily$longitude)),
+                                ncol=length(unique(SSTanom.daily$latitude)))[,order(unique(SSTanom.daily$latitude))]
+    SSTanom.daily.r <- raster(apply(SSTanom.daily.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+    extent(SSTanom.daily.r) <- e.STB
+    # add daily raster to list
+    SSTanom.daily_1wkprior[[i]] <- SSTanom.daily.r 
+  }
+  SSTanom.monthly_1wkprior.r <- mean(stack(SSTanom.daily_1wkprior), na.rm=TRUE) # stack rasters together, take mean values over previous month
+  proj4string(SSTanom.monthly_1wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  ## 2 weeks prior (central)
+  SSTanom.daily_2wkprior <- list()
+  for(i in 1:length(dates_t.monthly)){
+    SSTanom.daily <- rxtractogon(dataInfo_SSTanom1d, parameter=parameter_SSTanom1d, tcoord = dates_2wkprior.monthly[i], 
+                                 xcoord = xcoord, ycoord = ycoord)
+    SSTanom.daily.mat <- matrix(SSTanom.daily$sstAnom,nrow=length(unique(SSTanom.daily$longitude)),
+                                ncol=length(unique(SSTanom.daily$latitude)))[,order(unique(SSTanom.daily$latitude))]
+    SSTanom.daily.r <- raster(apply(SSTanom.daily.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+    extent(SSTanom.daily.r) <- e.STB
+    # add daily raster to list
+    SSTanom.daily_2wkprior[[i]] <- SSTanom.daily.r 
+  }
+  SSTanom.monthly_2wkprior.r <- mean(stack(SSTanom.daily_2wkprior), na.rm=TRUE) # stack rasters together, take mean values over previous month
+  proj4string(SSTanom.monthly_2wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  ## 3 week prior (east)
+  SSTanom.daily_3wkprior <- list()
+  for(i in 1:length(dates_t.monthly)){
+    SSTanom.daily <- rxtractogon(dataInfo_SSTanom1d, parameter=parameter_SSTanom1d, tcoord = dates_3wkprior.monthly[i], 
+                                 xcoord = xcoord, ycoord = ycoord)
+    SSTanom.daily.mat <- matrix(SSTanom.daily$sstAnom,nrow=length(unique(SSTanom.daily$longitude)),
+                                ncol=length(unique(SSTanom.daily$latitude)))[,order(unique(SSTanom.daily$latitude))]
+    SSTanom.daily.r <- raster(apply(SSTanom.daily.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+    extent(SSTanom.daily.r) <- e.STB
+    # add daily raster to list
+    SSTanom.daily_3wkprior[[i]] <- SSTanom.daily.r 
+  }
+  SSTanom.monthly_3wkprior.r <- mean(stack(SSTanom.daily_3wkprior), na.rm=TRUE) # stack rasters together, take mean values over previous month
+  proj4string(SSTanom.monthly_3wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  
+  # Upwelling index (monthly)
+  Upwellingmonthly_1wkprior.r <- raster()
+  extent(Upwellingmonthly_1wkprior.r) <- e.STB
+  #values(Upwellingmonthly_1wkprior.r) <- mean(gridSTB.central.df$Upwellingmonthly_1wkprior[gridSTB.central.df$Date==as.character(date_t)]) #THIS
+  values(Upwellingmonthly_1wkprior.r) <- mean(UpwellingIndex.df$Upwellingmonthly_1wkprior[UpwellingIndex.df$Date==as.character(date_t)]) #THIS
+  proj4string(Upwellingmonthly_1wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Upwellingmonthly_2wkprior.r <- raster()
+  extent(Upwellingmonthly_2wkprior.r) <- e.STB
+  #values(Upwellingmonthly_2wkprior.r) <- mean(gridSTB.central.df$Upwellingmonthly_2wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  values(Upwellingmonthly_2wkprior.r) <- mean(UpwellingIndex.df$Upwellingmonthly_2wkprior[UpwellingIndex.df$Date==as.character(date_t)]) 
+  proj4string(Upwellingmonthly_2wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Upwellingmonthly_3wkprior.r <- raster()
+  extent(Upwellingmonthly_3wkprior.r) <- e.STB
+  #values(Upwellingmonthly_3wkprior.r) <- mean(gridSTB.central.df$Upwellingmonthly_3wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  values(Upwellingmonthly_3wkprior.r) <- mean(UpwellingIndex.df$Upwellingmonthly_3wkprior[UpwellingIndex.df$Date==as.character(date_t)]) 
+  proj4string(Upwellingmonthly_3wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  
+  # Windweekly
+  Windweekly_1wkprior.r <- raster()
+  extent(Windweekly_1wkprior.r) <- e.STB
+  values(Windweekly_1wkprior.r) <- mean(gridSTB.central.df$Windweekly_1wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windweekly_1wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Windweekly_2wkprior.r <- raster()
+  extent(Windweekly_2wkprior.r) <- e.STB
+  values(Windweekly_2wkprior.r) <- mean(gridSTB.central.df$Windweekly_2wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windweekly_2wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Windweekly_3wkprior.r <- raster()
+  extent(Windweekly_3wkprior.r) <- e.STB
+  values(Windweekly_3wkprior.r) <- mean(gridSTB.central.df$Windweekly_3wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windweekly_3wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  # Windsum30d
+  Windsum30d_1wkprior.r <- raster()
+  extent(Windsum30d_1wkprior.r) <- e.STB
+  values(Windsum30d_1wkprior.r) <- mean(gridSTB.central.df$Windsum30d_1wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windsum30d_1wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Windsum30d_2wkprior.r <- raster()
+  extent(Windsum30d_2wkprior.r) <- e.STB
+  values(Windsum30d_2wkprior.r) <- mean(gridSTB.central.df$Windsum30d_2wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windsum30d_2wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Windsum30d_3wkprior.r <- raster()
+  extent(Windsum30d_3wkprior.r) <- e.STB
+  values(Windsum30d_3wkprior.r) <- mean(gridSTB.central.df$Windsum30d_3wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windsum30d_3wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  # DayofSeason
+  DayofSeason.r <- raster()
+  extent(DayofSeason.r) <- e.STB
+  values(DayofSeason.r) <- mean(gridSTB.central.df$DayofSeason[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(DayofSeason.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  
+  ###########
+  # List and stack all layers by region, then set extent to region
+  ## west
+  env.SST_t.west <- list(SSTanom.monthly_1wkprior.r, Upwellingmonthly_1wkprior.r, Windweekly_1wkprior.r,
+                         Windsum30d_1wkprior.r, Lat.r, Lon.r, bathy_STB.r, DistToCoast.r, DayofSeason.r) # list all rasters
+  env.SST_t.west <- lapply(env.SST_t.west, projectRaster, SST_t.r, method='ngb') # resample at same resolution to allow stacking
+  envstack.SST_t.west <- stack(env.SST_t.west) # create stack
+  names(envstack.SST_t.west) <- c("SSTanommonthly_1wkprior", "Upwellingmonthly_1wkprior", "Windweekly_1wkprior",
+                                "Windsum30d_1wkprior", "Lat", "Lon", "Depth", "DistToCoast", "DayofSeason") # name according to pred vars in model
+  envstack.SST_t.west <- crop(envstack.SST_t.west, e.west)
+  
+  ## central
+  env.SST_t.central <- list(SSTanom.monthly_2wkprior.r, Upwellingmonthly_2wkprior.r, Windweekly_2wkprior.r,
+                         Windsum30d_2wkprior.r, Lat.r, Lon.r, bathy_STB.r, DistToCoast.r, DayofSeason.r) # list all rasters
+  env.SST_t.central <- lapply(env.SST_t.central, projectRaster, SST_t.r, method='ngb') # resample at same resolution to allow stacking
+  envstack.SST_t.central <- stack(env.SST_t.central) # create stack
+  names(envstack.SST_t.central) <- c("SSTanommonthly_2wkprior", "Upwellingmonthly_2wkprior", "Windweekly_2wkprior",
+                                "Windsum30d_2wkprior", "Lat", "Lon", "Depth", "DistToCoast", "DayofSeason") 
+  envstack.SST_t.central <- crop(envstack.SST_t.central, e.central)
+  
+  ## east
+  env.SST_t.east <- list(SSTanom.monthly_3wkprior.r, Upwellingmonthly_3wkprior.r, Windweekly_3wkprior.r,
+                         Windsum30d_3wkprior.r, Lat.r, Lon.r, bathy_STB.r, DistToCoast.r, DayofSeason.r) # list all rasters
+  env.SST_t.east <- lapply(env.SST_t.east, projectRaster, SST_t.r, method='ngb') # resample at same resolution to allow stacking
+  envstack.SST_t.east <- stack(env.SST_t.east) # create stack
+  names(envstack.SST_t.east) <- c("SSTanommonthly_3wkprior", "Upwellingmonthly_3wkprior", "Windweekly_3wkprior",
+                                "Windsum30d_3wkprior", "Lat", "Lon", "Depth", "DistToCoast", "DayofSeason") 
+  envstack.SST_t.east <- crop(envstack.SST_t.east, e.east)
+  
+  
+  # Predict!! 
+  pred.SST_t.west <- predict(envstack.SST_t.west,SSTwest_BRT, n.trees = SSTwest_BRT$gbm.call$best.trees, type = "response")
+  pred.SST_t.central <- predict(envstack.SST_t.central,SSTcentral_BRT, n.trees = SSTcentral_BRT$gbm.call$best.trees, type = "response")
+  pred.SST_t.east <- predict(envstack.SST_t.east,SSTeast_BRT, n.trees = SSTeast_BRT$gbm.call$best.trees, type = "response")
+  
+  # merge three regions into single raster
+  pred.SST_t <- mosaic(pred.SST_t.west, pred.SST_t.central, pred.SST_t.east, fun=mean)
+  
+  # calculate difference between observed and predicted values
+  dif.SST_t <- SST_t.r - pred.SST_t
+  
+  # SAVE EACH RASTER TO A LIST 
+  # 3 lists: observed, forecasted, and diff
+  SST_t.rasters[[j]] <- SST_t.r
+  SST_pred.rasters[[j]] <- pred.SST_t
+  SST_diff.rasters[[j]] <- dif.SST_t
+  
+  # Write observed and forecasted rasters to folders
+  writeRaster(SST_t.r, file=paste0("./Spatial prediction maps/VALIDATION DATES/SST rasters/observed/SST.observed_", ValDates[j],".tif"),overwrite=TRUE)
+  writeRaster(pred.SST_t, file=paste0("./Spatial prediction maps/VALIDATION DATES/SST rasters/forecasted/SST.forecasted_", ValDates[j],".tif"),overwrite=TRUE)
+
+}
+
+# # Stack all diff rasters in list, take mean of stack
+# SST_diff.stack <- stack(SST_diff.rasters)
+# SST_diff.mean <- mean(SST_diff.stack, na.rm=TRUE)
+# writeRaster(SST_diff.mean, file="./Spatial prediction maps/VALIDATION DATES/SST rasters/SST_diff.mean.tif", overwrite=TRUE)
+# 
+# # Convert predicted raster to df and mask out Cook Strait region
+# dif.SST_t_df <- as.data.frame(as(SST_diff.mean, "SpatialPixelsDataFrame"))
+# dif.SST_t_df[dif.SST_t_df$x > 173 & dif.SST_t_df$y < -41.2,] <- NA # remove Cook Strait points
+#   
+# diffplot <- ggplot() +
+#     geom_tile(data = dif.SST_t_df, aes(x=x, y=y, fill=layer)) +
+#     scale_fill_distiller(palette="Spectral", limits = c(-3,3))+
+#     geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="black") +
+#     coord_quickmap(xlim=c(170, 175.2), ylim=c(-42.05, -39.3))+
+#     scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+#     labs(fill = "Dif") + ggtitle("Observed SST - Forecasted SST") +
+#     xlab("Longitude") + ylab("Latitude") + theme_bw()
+# 
+# ggsave(diffplot, file=paste0("./Spatial prediction maps/VALIDATION DATES/SST plots/SST_diff.mean.png"),
+#          width = 160, height = 80, units = "mm")
+
+####
+
+# Loop to make plots
+SST.spatialpredplots <- list()
+
+for (j in 1:length(ValDates)) {
+  
+  date_t <- ValDates[j]
+  
+  # Convert predicted raster to df, so it can be brought in to ggplot more easily
+  SST_t_df <- as.data.frame(as(SST_t.rasters[[j]], "SpatialPixelsDataFrame"))
+  pred.SST_t_df <- as.data.frame(as(SST_pred.rasters[[j]], "SpatialPixelsDataFrame"))
+
+  # mask out cook strait region
+  SST_t_df[SST_t_df$x > 173 & SST_t_df$y < -41.2,] <- NA # remove Cook Strait points
+  pred.SST_t_df[pred.SST_t_df$x > 173 & pred.SST_t_df$y < -41.2,] <- NA # remove Cook Strait points
+
+  # Plot
+  p1 <- ggplot() +
+    geom_tile(data = SST_t_df, aes(x=x, y=y, fill=layer)) + 
+    scale_fill_distiller(palette="Spectral", limits = c(13,22))+ 
+    geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="black") +
+    coord_quickmap(xlim=c(170, 175.2), ylim=c(-42.05, -39.3))+ 
+    scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+    labs(fill = "SST") + ggtitle(paste(date_t,"Observed")) +
+    xlab("Longitude") + ylab("Latitude") + theme_bw() 
+  
+  p2 <- ggplot() +
+    geom_tile(data = pred.SST_t_df, aes(x=x, y=y, fill=layer)) +   
+    scale_fill_distiller(palette="Spectral", limits = c(13,22))+ 
+    geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="black") +
+    coord_quickmap(xlim=c(170, 175.2), ylim=c(-42.05, -39.3))+ 
+    scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+    labs(fill = "SST") + ggtitle(paste(date_t,"Forecasted")) +
+    xlab("Longitude") + ylab("Latitude") + theme_bw() 
+  
+  SST_t.multiplot <- plot_grid(p1, p2)  
+
+  SST.spatialpredplots[[j]] <- SST_t.multiplot
+  
+  # save plot
+  ggsave(SST_t.multiplot, file=paste0("./Spatial prediction maps/VALIDATION DATES/SST plots/SST.spatialpred_", ValDates[j],".png"),
+         width = 160, height = 80, units = "mm")
+}
+
+#SST.spatialpredplots
+
+
+```
+
+# logNPP
+```{r}
+logNPP_t.rasters <- list()
+logNPP_pred.rasters <- list()
+logNPP_diff.rasters <- list()
+
+for (j in 20:length(ValDates)) {
+  
+  date_t <- ValDates[j] # Date to predict to
+  #date_t <- as.Date("2017-02-05") # Date to predict to
+  date_1wkprior <- date_t-7
+  date_2wkprior <- date_t-14
+  date_3wkprior <- date_t-21
+  
+  dates_t.weekly <- seq(as.Date(date_t-6), as.Date(date_t), by="days")
+  dates_1wkprior.weekly <- dates_t.weekly-7
+  dates_2wkprior.weekly <- dates_t.weekly-14
+  dates_3wkprior.weekly <- dates_t.weekly-21
+  
+  dates_t.weekly <- seq(as.Date(date_t-6), as.Date(date_t), by="days")
+  dates_1wkprior.weekly <- dates_t.weekly-7
+  dates_2wkprior.weekly <- dates_t.weekly-14
+  dates_3wkprior.weekly <- dates_t.weekly-21
+  
+  dates_t.monthly <- seq(as.Date(date_t-29), as.Date(date_t), by="days")
+  dates_1wkprior.monthly <- dates_t.monthly-7
+  dates_2wkprior.monthly <- dates_t.monthly-14
+  dates_3wkprior.monthly <- dates_t.monthly-21
+  
+  # logNPP (what we're trying to predict)
+  NPP_t <- rxtractogon(dataInfo_NPP8d, parameter=parameter_NPP8d, tcoord = date_t, xcoord = xcoord, ycoord = ycoord, zcoord = 0)
+  NPP_t.mat <- matrix(NPP_t$productivity,nrow=length(unique(NPP_t$longitude)),
+                      ncol=length(unique(NPP_t$latitude)))[,order(unique(NPP_t$latitude))]
+  NPP_t.r <- raster(apply(NPP_t.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+  logNPP_t.r <- log(NPP_t.r)
+  extent(logNPP_t.r) <- e.STB
+  proj4string(logNPP_t.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  # SST anomaly (monthly)
+  ## 1 week prior (west)
+  SSTanom.daily_1wkprior <- list()
+  for(i in 1:length(dates_t.monthly)){
+    SSTanom.daily <- rxtractogon(dataInfo_SSTanom1d, parameter=parameter_SSTanom1d, tcoord = dates_1wkprior.monthly[i], 
+                                 xcoord = xcoord, ycoord = ycoord)
+    SSTanom.daily.mat <- matrix(SSTanom.daily$sstAnom,nrow=length(unique(SSTanom.daily$longitude)),
+                                ncol=length(unique(SSTanom.daily$latitude)))[,order(unique(SSTanom.daily$latitude))]
+    SSTanom.daily.r <- raster(apply(SSTanom.daily.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+    extent(SSTanom.daily.r) <- e.STB
+    # add daily raster to list
+    SSTanom.daily_1wkprior[[i]] <- SSTanom.daily.r 
+  }
+  SSTanom.monthly_1wkprior.r <- mean(stack(SSTanom.daily_1wkprior), na.rm=TRUE) # stack rasters together, take mean values over previous month
+  proj4string(SSTanom.monthly_1wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  ## 2 weeks prior (central)
+  SSTanom.daily_2wkprior <- list()
+  for(i in 1:length(dates_t.monthly)){
+    SSTanom.daily <- rxtractogon(dataInfo_SSTanom1d, parameter=parameter_SSTanom1d, tcoord = dates_2wkprior.monthly[i], 
+                                 xcoord = xcoord, ycoord = ycoord)
+    SSTanom.daily.mat <- matrix(SSTanom.daily$sstAnom,nrow=length(unique(SSTanom.daily$longitude)),
+                                ncol=length(unique(SSTanom.daily$latitude)))[,order(unique(SSTanom.daily$latitude))]
+    SSTanom.daily.r <- raster(apply(SSTanom.daily.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+    extent(SSTanom.daily.r) <- e.STB
+    # add daily raster to list
+    SSTanom.daily_2wkprior[[i]] <- SSTanom.daily.r 
+  }
+  SSTanom.monthly_2wkprior.r <- mean(stack(SSTanom.daily_2wkprior), na.rm=TRUE) # stack rasters together, take mean values over previous month
+  proj4string(SSTanom.monthly_2wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  ## 3 week prior (east)
+  SSTanom.daily_3wkprior <- list()
+  for(i in 1:length(dates_t.monthly)){
+    SSTanom.daily <- rxtractogon(dataInfo_SSTanom1d, parameter=parameter_SSTanom1d, tcoord = dates_3wkprior.monthly[i], 
+                                 xcoord = xcoord, ycoord = ycoord)
+    SSTanom.daily.mat <- matrix(SSTanom.daily$sstAnom,nrow=length(unique(SSTanom.daily$longitude)),
+                                ncol=length(unique(SSTanom.daily$latitude)))[,order(unique(SSTanom.daily$latitude))]
+    SSTanom.daily.r <- raster(apply(SSTanom.daily.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+    extent(SSTanom.daily.r) <- e.STB
+    # add daily raster to list
+    SSTanom.daily_3wkprior[[i]] <- SSTanom.daily.r 
+  }
+  SSTanom.monthly_3wkprior.r <- mean(stack(SSTanom.daily_3wkprior), na.rm=TRUE) # stack rasters together, take mean values over previous month
+  proj4string(SSTanom.monthly_3wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+
+  # SST (weekly)
+  ## 1 week prior (west)
+  SST.daily_1wkprior <- list()
+  for(i in 1:length(dates_t.weekly)){
+    SST.daily <- rxtractogon(dataInfo_SST1d, parameter=parameter_SST1d, tcoord = dates_1wkprior.weekly[i], 
+                                 xcoord = xcoord, ycoord = ycoord)
+    SST.daily.mat <- matrix(SST.daily$analysed_sst,nrow=length(unique(SST.daily$longitude)),
+                                ncol=length(unique(SST.daily$latitude)))[,order(unique(SST.daily$latitude))]
+    SST.daily.r <- raster(apply(SST.daily.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+    extent(SST.daily.r) <- e.STB
+    # add daily raster to list
+    SST.daily_1wkprior[[i]] <- SST.daily.r 
+  }
+  SST.weekly_1wkprior.r <- mean(stack(SST.daily_1wkprior), na.rm=TRUE) # stack rasters together, take mean values over previous month
+  proj4string(SST.weekly_1wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  ## 2 weeks prior (central)
+  SST.daily_2wkprior <- list()
+  for(i in 1:length(dates_t.weekly)){
+    SST.daily <- rxtractogon(dataInfo_SST1d, parameter=parameter_SST1d, tcoord = dates_2wkprior.weekly[i], 
+                                 xcoord = xcoord, ycoord = ycoord)
+    SST.daily.mat <- matrix(SST.daily$analysed_sst,nrow=length(unique(SST.daily$longitude)),
+                                ncol=length(unique(SST.daily$latitude)))[,order(unique(SST.daily$latitude))]
+    SST.daily.r <- raster(apply(SST.daily.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+    extent(SST.daily.r) <- e.STB
+    # add daily raster to list
+    SST.daily_2wkprior[[i]] <- SST.daily.r 
+  }
+  SST.weekly_2wkprior.r <- mean(stack(SST.daily_2wkprior), na.rm=TRUE) # stack rasters together, take mean values over previous month
+  proj4string(SST.weekly_2wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  ## 3 week prior (east)
+  SST.daily_3wkprior <- list()
+  for(i in 1:length(dates_t.weekly)){
+    SST.daily <- rxtractogon(dataInfo_SST1d, parameter=parameter_SST1d, tcoord = dates_3wkprior.weekly[i], 
+                                 xcoord = xcoord, ycoord = ycoord)
+    SST.daily.mat <- matrix(SST.daily$analysed_sst,nrow=length(unique(SST.daily$longitude)),
+                                ncol=length(unique(SST.daily$latitude)))[,order(unique(SST.daily$latitude))]
+    SST.daily.r <- raster(apply(SST.daily.mat, 1, rev)) #rotates matrix (weird quirk), makes converts to raster
+    extent(SST.daily.r) <- e.STB
+    # add daily raster to list
+    SST.daily_3wkprior[[i]] <- SST.daily.r 
+  }
+  SST.weekly_3wkprior.r <- mean(stack(SST.daily_3wkprior), na.rm=TRUE) # stack rasters together, take mean values over previous month
+  proj4string(SST.weekly_3wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  
+  # Upwelling index (monthly)
+  Upwellingmonthly_1wkprior.r <- raster()
+  extent(Upwellingmonthly_1wkprior.r) <- e.STB
+  #values(Upwellingmonthly_1wkprior.r) <- mean(gridSTB.central.df$Upwellingmonthly_1wkprior[gridSTB.central.df$Date==as.character(date_t)]) #THIS
+  values(Upwellingmonthly_1wkprior.r) <- mean(UpwellingIndex.df$Upwellingmonthly_1wkprior[UpwellingIndex.df$Date==as.character(date_t)]) #THIS
+  proj4string(Upwellingmonthly_1wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Upwellingmonthly_2wkprior.r <- raster()
+  extent(Upwellingmonthly_2wkprior.r) <- e.STB
+  #values(Upwellingmonthly_2wkprior.r) <- mean(gridSTB.central.df$Upwellingmonthly_2wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  values(Upwellingmonthly_2wkprior.r) <- mean(UpwellingIndex.df$Upwellingmonthly_2wkprior[UpwellingIndex.df$Date==as.character(date_t)]) 
+  proj4string(Upwellingmonthly_2wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Upwellingmonthly_3wkprior.r <- raster()
+  extent(Upwellingmonthly_3wkprior.r) <- e.STB
+  #values(Upwellingmonthly_3wkprior.r) <- mean(gridSTB.central.df$Upwellingmonthly_3wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  values(Upwellingmonthly_3wkprior.r) <- mean(UpwellingIndex.df$Upwellingmonthly_3wkprior[UpwellingIndex.df$Date==as.character(date_t)]) 
+  proj4string(Upwellingmonthly_3wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  
+  # Windweekly
+  Windweekly_1wkprior.r <- raster()
+  extent(Windweekly_1wkprior.r) <- e.STB
+  values(Windweekly_1wkprior.r) <- mean(gridSTB.central.df$Windweekly_1wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windweekly_1wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Windweekly_2wkprior.r <- raster()
+  extent(Windweekly_2wkprior.r) <- e.STB
+  values(Windweekly_2wkprior.r) <- mean(gridSTB.central.df$Windweekly_2wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windweekly_2wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Windweekly_3wkprior.r <- raster()
+  extent(Windweekly_3wkprior.r) <- e.STB
+  values(Windweekly_3wkprior.r) <- mean(gridSTB.central.df$Windweekly_3wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windweekly_3wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  # Windsum30d
+  Windsum30d_1wkprior.r <- raster()
+  extent(Windsum30d_1wkprior.r) <- e.STB
+  values(Windsum30d_1wkprior.r) <- mean(gridSTB.central.df$Windsum30d_1wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windsum30d_1wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Windsum30d_2wkprior.r <- raster()
+  extent(Windsum30d_2wkprior.r) <- e.STB
+  values(Windsum30d_2wkprior.r) <- mean(gridSTB.central.df$Windsum30d_2wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windsum30d_2wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  Windsum30d_3wkprior.r <- raster()
+  extent(Windsum30d_3wkprior.r) <- e.STB
+  values(Windsum30d_3wkprior.r) <- mean(gridSTB.central.df$Windsum30d_3wkprior[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(Windsum30d_3wkprior.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  # DayofSeason
+  DayofSeason.r <- raster()
+  extent(DayofSeason.r) <- e.STB
+  values(DayofSeason.r) <- mean(gridSTB.central.df$DayofSeason[gridSTB.central.df$Date==as.character(date_t)]) 
+  proj4string(DayofSeason.r) <- CRS( "+proj=longlat +datum=WGS84 +no_defs" )
+  
+  
+  ###########
+  # List and stack all layers by region, then set extent to region
+  ## west
+  env.logNPP_t.west <- list(SSTanom.monthly_1wkprior.r, SST.weekly_1wkprior.r, Upwellingmonthly_1wkprior.r, Windweekly_1wkprior.r,
+                         Windsum30d_1wkprior.r, Lat.r, Lon.r, bathy_STB.r, DistToCoast.r, DayofSeason.r) # list all rasters
+  env.logNPP_t.west <- lapply(env.logNPP_t.west, projectRaster, logNPP_t.r, method='ngb') # resample at same resolution to allow stacking
+  envstack.logNPP_t.west <- stack(env.logNPP_t.west) # create stack
+  names(envstack.logNPP_t.west) <- c("SSTanommonthly_1wkprior", "SSTweekly_1wkprior", "Upwellingmonthly_1wkprior", "Windweekly_1wkprior",
+                                "Windsum30d_1wkprior", "Lat", "Lon", "Depth", "DistToCoast", "DayofSeason") # name according to pred vars in model
+  envstack.logNPP_t.west <- crop(envstack.logNPP_t.west, e.west)
+  
+  ## central
+  env.logNPP_t.central <- list(SSTanom.monthly_2wkprior.r, SST.weekly_2wkprior.r, Upwellingmonthly_2wkprior.r, Windweekly_2wkprior.r,
+                         Windsum30d_2wkprior.r, Lat.r, Lon.r, bathy_STB.r, DistToCoast.r, DayofSeason.r) # list all rasters
+  env.logNPP_t.central <- lapply(env.logNPP_t.central, projectRaster, logNPP_t.r, method='ngb') # resample at same resolution to allow stacking
+  envstack.logNPP_t.central <- stack(env.logNPP_t.central) # create stack
+  names(envstack.logNPP_t.central) <- c("SSTanommonthly_2wkprior", "SSTweekly_2wkprior", "Upwellingmonthly_2wkprior", "Windweekly_2wkprior",
+                                "Windsum30d_2wkprior", "Lat", "Lon", "Depth", "DistToCoast", "DayofSeason") 
+  envstack.logNPP_t.central <- crop(envstack.logNPP_t.central, e.central)
+  
+  ## east
+  env.logNPP_t.east <- list(SSTanom.monthly_3wkprior.r, SST.weekly_3wkprior.r, Upwellingmonthly_3wkprior.r, Windweekly_3wkprior.r,
+                         Windsum30d_3wkprior.r, Lat.r, Lon.r, bathy_STB.r, DistToCoast.r, DayofSeason.r) # list all rasters
+  env.logNPP_t.east <- lapply(env.logNPP_t.east, projectRaster, logNPP_t.r, method='ngb') # resample at same resolution to allow stacking
+  envstack.logNPP_t.east <- stack(env.logNPP_t.east) # create stack
+  names(envstack.logNPP_t.east) <- c("SSTanommonthly_3wkprior", "SSTweekly_3wkprior", "Upwellingmonthly_3wkprior", "Windweekly_3wkprior",
+                                "Windsum30d_3wkprior", "Lat", "Lon", "Depth", "DistToCoast", "DayofSeason") 
+  envstack.logNPP_t.east <- crop(envstack.logNPP_t.east, e.east)
+  
+  
+  # Predict!! 
+  pred.logNPP_t.west <- predict(envstack.logNPP_t.west,logNPPwest_BRT, n.trees = logNPPwest_BRT$gbm.call$best.trees, type = "response")
+  pred.logNPP_t.central <- predict(envstack.logNPP_t.central,logNPPcentral_BRT, n.trees = logNPPcentral_BRT$gbm.call$best.trees, type = "response")
+  pred.logNPP_t.east <- predict(envstack.logNPP_t.east,logNPPeast_BRT, n.trees = logNPPeast_BRT$gbm.call$best.trees, type = "response")
+  
+  # merge three regions into single raster
+  pred.logNPP_t <- mosaic(pred.logNPP_t.west, pred.logNPP_t.central, pred.logNPP_t.east, fun=mean)
+  
+  # calculate difference between observed and predicted values
+  dif.logNPP_t <- logNPP_t.r - pred.logNPP_t
+  
+  # SAVE EACH RASTER TO A LIST 
+  # 3 lists: observed, forecasted, and diff
+  logNPP_t.rasters[[j]] <- logNPP_t.r
+  logNPP_pred.rasters[[j]] <- pred.logNPP_t
+  logNPP_diff.rasters[[j]] <- dif.logNPP_t
+  
+  # Write observed and forecasted rasters to folders
+  writeRaster(logNPP_t.r, file=paste0("./Spatial prediction maps/VALIDATION DATES/NPP rasters/observed/logNPP.observed_", ValDates[j],".tif"),overwrite=TRUE)
+  writeRaster(pred.logNPP_t, file=paste0("./Spatial prediction maps/VALIDATION DATES/NPP rasters/forecasted/logNPP.forecasted_", ValDates[j],".tif"),overwrite=TRUE)
+
+}
+
+# # Stack all diff rasters in list, take mean of stack
+# logNPP_diff.stack <- stack(logNPP_diff.rasters)
+# logNPP_diff.mean <- mean(logNPP_diff.stack, na.rm=TRUE)
+# writeRaster(logNPP_diff.mean, file="./Spatial prediction maps/VALIDATION DATES/NPP rasters/logNPP_diff.mean.tif", overwrite=TRUE)
+# 
+# # Convert predicted raster to df and mask out Cook Strait region
+# dif.logNPP_t_df <- as.data.frame(as(logNPP_diff.mean, "SpatialPixelsDataFrame"))
+# dif.logNPP_t_df[dif.logNPP_t_df$x > 173 & dif.logNPP_t_df$y < -41.2,] <- NA # remove Cook Strait points
+#   
+# diffplot <- ggplot() +
+#     geom_tile(data = dif.logNPP_t_df, aes(x=x, y=y, fill=layer)) +
+#     scale_fill_distiller(palette="Spectral", limits = c(-3,3))+
+#     geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="black") +
+#     coord_quickmap(xlim=c(170, 175.2), ylim=c(-42.05, -39.3))+
+#     scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+#     labs(fill = "Dif") + ggtitle("Observed logNPP - Forecasted logNPP") +
+#     xlab("Longitude") + ylab("Latitude") + theme_bw()
+# 
+# ggsave(diffplot, file=paste0("./Spatial prediction maps/VALIDATION DATES/NPP plots/logNPP_diff.mean.png"),
+#          width = 160, height = 80, units = "mm")
+
+####
+
+# Loop to make plots
+logNPP.spatialpredplots <- list()
+
+for (j in 1:length(ValDates)) {
+  
+  date_t <- ValDates[j]
+  
+  # Convert predicted raster to df, so it can be brought in to ggplot more easily
+  logNPP_t_df <- as.data.frame(as(logNPP_t.rasters[[j]], "SpatialPixelsDataFrame"))
+  pred.logNPP_t_df <- as.data.frame(as(logNPP_pred.rasters[[j]], "SpatialPixelsDataFrame"))
+  dif.logNPP_t_df <- as.data.frame(as(logNPP_diff.rasters[[j]], "SpatialPixelsDataFrame"))
+  
+  # mask out cook strait region
+  logNPP_t_df[logNPP_t_df$x > 173 & logNPP_t_df$y < -41.2,] <- NA # remove Cook Strait points
+  pred.logNPP_t_df[pred.logNPP_t_df$x > 173 & pred.logNPP_t_df$y < -41.2,] <- NA # remove Cook Strait points
+  dif.logNPP_t_df[dif.logNPP_t_df$x > 173 & dif.logNPP_t_df$y < -41.2,] <- NA # remove Cook Strait points
+  
+  # Plot
+  p1 <- ggplot() +
+    geom_tile(data = logNPP_t_df, aes(x=x, y=y, fill=layer)) + 
+    scale_fill_viridis(limits = c(5,10)) +
+    geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="black") +
+    coord_quickmap(xlim=c(170, 175.2), ylim=c(-42.05, -39.3))+ 
+    scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+    labs(fill = "logNPP") + ggtitle(paste(date_t,"Observed")) +
+    xlab("Longitude") + ylab("Latitude") + theme_bw() 
+  
+  p2 <- ggplot() +
+    geom_tile(data = pred.logNPP_t_df, aes(x=x, y=y, fill=layer)) +   
+    scale_fill_viridis(limits = c(5,10)) +
+    geom_polygon(data = NZ, aes(x=long, y=lat, group=group), color="black", fill="black") +
+    coord_quickmap(xlim=c(170, 175.2), ylim=c(-42.05, -39.3))+ 
+    scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
+    labs(fill = "logNPP") + ggtitle(paste(date_t,"Forecasted")) +
+    xlab("Longitude") + ylab("Latitude") + theme_bw() 
+  
+  logNPP_t.multiplot <- plot_grid(p1, p2)  
+
+  logNPP.spatialpredplots[[j]] <- logNPP_t.multiplot
+  
+  # save plot
+  ggsave(logNPP_t.multiplot, file=paste0("./Spatial prediction maps/VALIDATION DATES/NPP plots/logNPP.spatialpred_", ValDates[j],".png"),
+         width = 160, height = 80, units = "mm")
+}
+
+logNPP.spatialpredplots
+
+```
+
