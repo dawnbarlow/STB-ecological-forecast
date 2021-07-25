@@ -1,7 +1,7 @@
 ---
 title: "Forecast ms figures"
 author: "Dawn Barlow"
-date: "6/11/2021"
+date: "7/14/2021"
 output: html_document
 ---
 
@@ -31,7 +31,7 @@ Map of the STB with regions, grid points for forecast models, wind station, upwe
 ```{r}
 
 # grid point locations for forecast model data
-gridSTB.df <- read.csv("gridSTB.pointlocations.df.csv")
+gridSTB.df <- read.csv("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/gridSTB.pointlocations.df.csv")
 
 # upwelling index calculation areas
 # Chiswell offshore
@@ -68,7 +68,7 @@ bathy <- projectRaster(bathy, crs = ('+proj=longlat +datum=WGS84'))
 bathy_STB <- crop(bathy, extent(170, 177, -43, -38.5))
 
 bathy_STB.df <- as.data.frame(bathy_STB, xy=TRUE)
-bathy_STB.df$Depth <- (bathy_STB.df$layer)* -1
+bathy_STB.df$Depth <- (bathy_STB.df$NIWA_depth_rast_.5x.5)* -1
 bathy_STB.df$Depth[bathy_STB.df$Depth>0] <- 0
 bathy_STB.df$Depth[bathy_STB.df$Depth<(-350)] <- -350
 
@@ -108,8 +108,8 @@ StudyArea.map1 <- ggplot() +
   geom_point(data = WindStationlocs[WindStationlocs$Station=="Farewell Spit",], aes(x=Lon, y=Lat), shape=24, fill="purple", size=2.6)+
 
   theme(legend.background = element_blank(), legend.text = element_text(color = "white"), legend.title = element_text(color = "white")) +
-  ylab("Latitude") + xlab("Longitude") +
-  theme(legend.justification=c(1,0), legend.position=c(.96,.25))
+  ylab("Latitude") + xlab("Longitude") + labs(fill="Depth (m)") +
+  theme(legend.justification=c(1,0), legend.position=c(.98,.25))
   
   
 StudyArea.map1
@@ -136,7 +136,7 @@ StudyArea.map2 <- StudyArea.map1 +
 
 StudyArea.map2
 
-#ggsave(StudyArea.map2, filename="./forecast models manuscript/plots/StudyAreaMap.png", device = "png", height=140, width=180, units="mm")
+ggsave(StudyArea.map2, filename="C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/forecast models manuscript/plots/StudyAreaMap_rev.png", device = "png", height=140, width=180, units="mm")
 
 
 
@@ -420,8 +420,8 @@ Available habitat, true positive rate, false negative rate at varying thresholds
 ```{r}
 
 # get all values from sighting/background locs in dfs
-predvalues.background.list <- readRDS("predvalues.background.list.rds")
-predvalues.sightings.list <- readRDS("predvalues.sightings.list.rds")
+predvalues.background.list <- readRDS("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/predvalues.background.list.rds")
+predvalues.sightings.list <- readRDS("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/predvalues.sightings.list.rds")
 
 predvalues.sightings.df <- as.data.frame(Reduce(c,predvalues.sightings.list))
 colnames(predvalues.sightings.df) <- "pred"
@@ -437,7 +437,7 @@ length(predvalues.sightings.df$pred[predvalues.sightings.df$pred>0.4])/length(pr
 length(predvalues.sightings.df$pred[predvalues.sightings.df$pred<0.4])/length(predvalues.sightings.df$pred) 
 
 # Read in performance at each threshold 
-perf.at.thresh.df <- read.csv("WhaleModel.Performance.at.thresh.df.csv")
+perf.at.thresh.df <- read.csv("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/WhaleModel.Performance.at.thresh.df.csv")
 
 # PLOT
 perf.at.thresh.plot <- ggplot(data = perf.at.thresh.df, aes(x=thresholds)) +
@@ -450,12 +450,12 @@ perf.at.thresh.plot <- ggplot(data = perf.at.thresh.df, aes(x=thresholds)) +
     breaks=c("Proportion of habitat", "False negative rate", "True positive rate"),
     values = c("black","dark blue", "dark green")) +
   scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
-  xlab("Threshold") + ylab("") + theme_classic() #+
+  xlab("Threshold") + ylab("Proportion") + theme_classic() #+
   #theme(legend.position=c(.9, .56))
 
 perf.at.thresh.plot
 
-ggsave(perf.at.thresh.plot, file="./forecast models manuscript/plots/WhaleModel.perf.at.thresh.png",
+ggsave(perf.at.thresh.plot, file="C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/forecast models manuscript/plots/WhaleModel.perf.at.thresh_v2.png",
          width = 180, height=80, units = "mm")
 
 
@@ -498,7 +498,7 @@ for (i in exampledays) {
     scale_x_continuous(expand = c(0, 0)) + scale_y_continuous(expand = c(0, 0)) +
     xlab("") + ylab("") + labs(fill = "Probability\nof presence") +
     #ggtitle(paste(names(predlayers.list[i]))) + 
-    annotate(geom = "text", y=-39.4, x=170.9, label = paste(names(predlayers.list[i]))) +
+    #annotate(geom = "text", y=-39.4, x=170.9, label = paste(names(predlayers.list[i]))) +
     theme_bw()
 
     
@@ -690,8 +690,47 @@ ggsave(CTDmap, file="./forecast models manuscript/plots/CTDmap.png",
          width = 180, height = 80, units = "mm")
 ```
 
+# Fig. S2: 
+Map of sighting locations
+```{r}
+# PA data data (all sightings and background points)
+PA_AllSightings.df <- read.csv("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/SightingsBackgroundPoints.RSdata.forecast_Jan2021.csv")
+PA_AllSightings.df$X <- NULL
 
-# Fig. S2:
+SightingsDates <- as.Date(unique(PA_AllSightings.df$Date))
+length(SightingsDates)
+
+PA_AllSightings.df$Date <- as.Date(PA_AllSightings.df$Date)
+
+# make study area polygon using sf
+Lon <- c(171.5,170.55,171.85,174.7, 175.5, 174.7,174.3,172.77,171.5) # need to "close" the polygon
+Lat <- c(-42.05,-42.05,-38.6,-38.6, -40.5 ,-41.2,-41.2,-40.55,-42.05)
+
+StudyArea <- as.data.frame(cbind(Lon,Lat)) 
+
+StudyArea.polygon_wgs <- StudyArea %>%
+  st_as_sf(coords = c("Lon", "Lat"),crs = "+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs") %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  st_cast("POLYGON")
+
+#plot(StudyArea.polygon_wgs, axes=TRUE)
+
+# plot sightings by year
+sightingsmap <- ggplot() +
+  geom_point(data = PA_AllSightings.df[PA_AllSightings.df$presence==1,], aes(x=Longitude, y=Latitude), shape=24, fill="royal blue") +
+  geom_sf(data = StudyArea.polygon_wgs, fill = "transparent") +
+  geom_sf(data = NZcoastlines.sf, color="dark gray", fill="dark gray") +
+  coord_sf(xlim=c(170,175.2), ylim=c(-42.05,-38.5)) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5)) +
+  facet_wrap(~SummerYear, nrow=2)
+
+ggsave(sightingsmap, file="C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/forecast models manuscript/plots/sightingsmap.png",
+         width = 180, height = 115, units = "mm")
+
+```
+
+
+# Fig. S3:
 CTD-RS data comparison
 ```{r}
 
@@ -864,17 +903,17 @@ ggsave(insitu_rs.multipanel, file="./forecast models manuscript/plots/insitu_rs.
 
 ```
 
-# Fig. S3: 
+# Fig. S4 & S5: 
 Functional response curves for environmental forecast models, with all three regions plotted together
 ```{r}
 # Read in models 
-SSTwest_BRT <- readRDS("SSTwest_BRT.rds")
-SSTcentral_BRT <- readRDS("SSTcentral_BRT.rds")
-SSTeast_BRT <- readRDS("SSTeast_BRT.rds")
+SSTwest_BRT <- readRDS("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/SSTwest_BRT.rds")
+SSTcentral_BRT <- readRDS("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/SSTcentral_BRT.rds")
+SSTeast_BRT <- readRDS("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/SSTeast_BRT.rds")
 
-logNPPwest_BRT <- readRDS("logNPPwest_BRT.rds")
-logNPPcentral_BRT <- readRDS("logNPPcentral_BRT.rds")
-logNPPeast_BRT <- readRDS("logNPPeast_BRT.rds")
+logNPPwest_BRT <- readRDS("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/logNPPwest_BRT.rds")
+logNPPcentral_BRT <- readRDS("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/logNPPcentral_BRT.rds")
+logNPPeast_BRT <- readRDS("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/logNPPeast_BRT.rds")
 
 gridSTB.west.df <- read.csv("gridSTB.west.df_RSdata_Jan2021.csv")
 gridSTB.central.df <- read.csv("gridSTB.central.df_RSdata_Jan2021.csv")
@@ -1250,9 +1289,7 @@ ggInfluence(logNPPeast_BRT)
 ```
 
 
-
-
-# Fig. S4:
+# Fig. S6:
 ```{r}
 
 PApreds.hist <- ggplot() +
@@ -1270,6 +1307,70 @@ PApreds.hist
 
 ggsave(PApreds.hist, file="./forecast models manuscript/plots/PAdiscrimination.png",
          width = 80, height=80, units = "mm")
+
+```
+
+
+################################
+# BRT interactions
+Tables S4, S5, S6. 
+```{r}
+
+SSTwest_BRT.int <- gbm.interactions(SSTwest_BRT)
+SSTwest_BRT.int$interactions
+SSTwest_BRT.int$rank.list
+
+SSTcentral_BRT.int <- gbm.interactions(SSTcentral_BRT)
+#SSTcentral_BRT.int$interactions
+SSTcentral_BRT.int$rank.list
+
+SSTeast_BRT.int <- gbm.interactions(SSTeast_BRT)
+#SSTeast_BRT.int$interactions
+SSTeast_BRT.int$rank.list
+
+logNPPwest_BRT.int <- gbm.interactions(logNPPwest_BRT)
+#logNPPwest_BRT.int$interactions
+logNPPwest_BRT.int$rank.list
+
+logNPPcentral_BRT.int <- gbm.interactions(logNPPcentral_BRT)
+#logNPPcentral_BRT.int$interactions
+logNPPcentral_BRT.int$rank.list
+
+logNPPeast_BRT.int <- gbm.interactions(logNPPeast_BRT)
+#logNPPeast_BRT.int$interactions
+logNPPeast_BRT.int$rank.list
+
+
+##########################################################################################################################################
+whales.allsightings_BRT <- readRDS("C:/Users/barlowd/Desktop/Box Sync/Documents - BoxSync to desktop/OSU/Blue Whales/Habitat/Forecast models/whales.allsightings_BRT2.rds")
+
+whales.allsightings_BRT.int <- gbm.interactions(whales.allsightings_BRT)
+int <- whales.allsightings_BRT.int$interactions
+int
+whales.allsightings_BRT.int$rank.list
+
+###
+gbm.perspec(whales.allsightings_BRT, 2,4,
+            x.label = "\nDepth",
+            y.label = "\nLog(NPP)",
+            z.label = "\nProbability of Presence",
+            col="blue")
+gbm.perspec(whales.allsightings_BRT, 2,5,
+            x.label = "\nDepth",
+            y.label = "\nRelative SST",
+            z.label = "\nProbability of Presence",
+            col="blue")
+gbm.perspec(whales.allsightings_BRT, 4,6,
+            x.label = "\nLog(NPP)",
+            y.label = "\nRelative log(NPP)",
+            z.label = "\nProbability of Presence",
+            col="blue")
+gbm.perspec(whales.allsightings_BRT, 2,3,
+            x.label = "\nDepth",
+            y.label = "\nSST",
+            z.label = "\nProbability of Presence",
+            col="blue")
+
 
 ```
 
